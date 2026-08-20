@@ -1,0 +1,8 @@
+[submodule "tartan_imu_ros"]
+	path = ros2_ws/src/tartan_imu_ros
+	url = https://github.com/fuRo-inc/tartan_imu_ros.git
+
+
+[submodule "tartan_imu_scripts"]
+	path = scripts
+	url = https://github.com/fuRo-inc/tartan_imu_scripts.git

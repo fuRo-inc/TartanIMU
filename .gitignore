@@ -3,7 +3,12 @@ __pycache__/
 *.egg-info/
 .eggs/
 build/
+data/
 dist/
+install/
+log/
+onnx/
+tartan_imu_weights/
 .pytest_cache/
 .ruff_cache/
 # experiment / run artifacts

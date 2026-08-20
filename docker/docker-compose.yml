@@ -1,0 +1,24 @@
+services:
+  tartan_imu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        USERNAME: ${USERNAME}
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+
+    container_name: tartan_imu
+
+    network_mode: host
+
+    volumes:
+      - ..:/home/furo/workspace/TartanIMU
+
+    working_dir: /home/furo/workspace/TartanIMU
+
+    environment:
+      ROS_DOMAIN_ID: "0"
+
+    stdin_open: true
+    tty: true
