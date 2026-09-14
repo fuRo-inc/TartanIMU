@@ -291,8 +291,8 @@ def fun_test_forward(cfg, model, batch, start_cov_epochs, epoch, past_kv=None, t
         )
 
         # Apply velocity smoothing to reduce jittering
-        from tartan_imu.model.common.losses import smooth_velocity_predictions
-        pred = smooth_velocity_predictions(pred, window_size=3)
+        # from tartan_imu.model.common.losses import smooth_velocity_predictions
+        # pred = smooth_velocity_predictions(pred, window_size=3)
 
     loss = get_sequence_smooth_loss(pred, pred_cov, targ, epoch, start_cov_epochs)
 
