@@ -21,8 +21,7 @@ from tools import distributed_eval
 
 # Try to import lora (may not be available in all environments)
 try:
-    import lora
-
+    from tartan_imu.model.adapters import lora
     LORA_AVAILABLE = True
 except ImportError:
     LORA_AVAILABLE = False
@@ -549,7 +548,7 @@ class Trainer:
             info("Initialized tracking variables for finetune stage")
 
         # freeze subt base model params
-        self.model = freeze_backbone_parameters(self.model)
+        # self.model = freeze_backbone_parameters(self.model)
 
         # add lora params to base model (if available)
         if LORA_AVAILABLE:
@@ -589,10 +588,13 @@ class Trainer:
             ratio = current_frame / total_trajectory_frames
             if sum(time_buffer) > int((current_frame + 200 - 4000) / 200):
                 current_frame += 200
-            train_loss = np.average(train_attr_dict["losses"])
-            train_loss_mse = np.mean(
-                (train_attr_dict["targets"] - train_attr_dict["preds"]) ** 2
-            )
+            # train_loss = np.average(train_attr_dict["losses"])
+            # train_loss_mse = np.mean(
+            #     (train_attr_dict["targets"] - train_attr_dict["preds"]) ** 2
+            # )
+            train_loss = float(train_attr_dict["avg_loss"])
+            train_loss_mse = float(train_attr_dict["avg_mse"])
+                        
             instance_per_second = len(train_loader.dataset) / epoch_time
 
             if self.log:
@@ -694,10 +696,12 @@ class Trainer:
 
             # Training step
             train_attr_dict = self.train_step(train_loader, epoch, fix_backbone=True)
-            train_loss = np.average(train_attr_dict["losses"])
-            train_mse = np.mean(
-                (train_attr_dict["targets"] - train_attr_dict["preds"]) ** 2
-            )
+            # train_loss = np.average(train_attr_dict["losses"])
+            # train_mse = np.mean(
+            #     (train_attr_dict["targets"] - train_attr_dict["preds"]) ** 2
+            # )
+            train_loss = float(train_attr_dict["avg_loss"])
+            train_mse = float(train_attr_dict["avg_mse"])
             epoch_train_loss.append(train_loss)
 
             # Validation step (if available)
