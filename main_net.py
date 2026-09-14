@@ -22,7 +22,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import wandb
 from tartan_imu.config import configer
-from tartan_imu.config.resume import resolve_resume
 from tartan_imu.dataloader.paths import (
     GetDataPath,
     GetTartanAirDataPath,
@@ -572,7 +571,9 @@ def main(rank: int, world_size: int, args, resume_path, model_path, cfg):
 
         # Training mode
         if cfg["schemes"]["train"]:
-            trainer = configer.build_trainer(args, cfg, model, resume_path)
+            trainer = configer.build_trainer(
+                args, cfg, model, pretrained_path=model_path, resume_path=resume_path
+            )
 
             if cfg["schemes"]["online_adaption"]:
                 # Online adaptation mode
@@ -729,9 +730,8 @@ if __name__ == "__main__":
         raise
     resume_path = args.resume_from
     model_path = args.checkpoint
-    # Make an explicit --resume_from actually resume: build_trainer only restores
-    # a checkpoint when cfg train.use_pretrain_model is set (see config/resume.py).
-    resolve_resume(cfg, resume_path)
+    if resume_path and model_path:
+        parser.error("--checkpoint and --resume_from are mutually exclusive")
     gpu_num = torch.cuda.device_count()
 
     # Single GPU mode support

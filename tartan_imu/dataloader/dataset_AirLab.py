@@ -32,6 +32,7 @@ class AirLabNPZSequence(object):
         mode="test",
         plot=False,
         velocity_target="window_mean",
+        current_velocity_max_speed=10.0,
     ):
         super().__init__()
         (
@@ -55,6 +56,7 @@ class AirLabNPZSequence(object):
         self.use_local_coord = use_local_coord
         self.motion_type = None
         self.velocity_target = velocity_target
+        self.current_velocity_max_speed = float(current_velocity_max_speed)
 
         if data_path is not None:
             self.valid = self.load(data_path, verbose=verbose)
@@ -108,8 +110,20 @@ class AirLabNPZSequence(object):
             velocity_global_current = np.asarray(all_data[direct_key], dtype=np.float64)
             if velocity_global_current.shape != pos.shape:
                 raise ValueError(f"{direct_key} must have shape {pos.shape}, got {velocity_global_current.shape}")
+            # Direct simulator velocity remains authoritative. Keep its sanity
+            # check separate from the position-difference fallback policy.
+            self.current_velocity_source = "direct"
+            self.current_velocity_valid = np.isfinite(velocity_global_current).all(axis=1)
+            invalid_direct = int((~self.current_velocity_valid).sum())
+            if invalid_direct:
+                logging.warning("current direct simulator velocity has %d non-finite timestamps", invalid_direct)
         else:
             velocity_global_current = current_velocity_from_positions(ts, pos)
+            self.current_velocity_source = "position_difference"
+            speed = np.linalg.norm(velocity_global_current, axis=1)
+            self.current_velocity_valid = np.isfinite(velocity_global_current).all(axis=1) & (
+                speed <= self.current_velocity_max_speed
+            )
         velocity_body_current = world_to_body_velocity(velocity_global_current, quat)
         velocity_global, velocity_body = calculate_velocity_from_poses(ts, pos, quat)
 
@@ -197,6 +211,9 @@ class AirLabNPZSequence(object):
         self.orientations = self.orientations[:-1]  # N*4
         self.pos_gt = self.pos_gt[:-1]  # N*3
         self.gt_ori = self.gt_ori[:-1]  # N*4
+        # Aligned with the common final-frame trim above.  Invalid targets are
+        # rejected at index construction time; they are never clipped.
+        self.current_velocity_valid = self.current_velocity_valid[:-1]
         if self.velocity_target == "window_mean":
             self.targets = self.targets[:-1]
         self.velocity_body = velocity_body  # N*3
@@ -241,6 +258,7 @@ class BasicSequenceData(object):
         self.valid_continue_good_time = 0.1
         self.use_local_coord = cfg["data"]["use_local_coord"]
         self.velocity_target = cfg["data"].get("velocity_target", cfg.get("model", {}).get("velocity_target", "window_mean"))
+        self.current_velocity_max_speed = float(cfg["data"].get("current_velocity_max_speed", 10.0))
         if self.velocity_target == "current" and (self.past_data_size or self.future_data_size):
             raise ValueError("current velocity mode requires past_time=future_time=0; input history must be causal")
         self.mode = kwargs.get("mode", "train")
@@ -271,6 +289,7 @@ class BasicSequenceData(object):
                     use_local_coord=self.use_local_coord,
                     mode=self.mode,
                     velocity_target=self.velocity_target,
+                    current_velocity_max_speed=self.current_velocity_max_speed,
                 )
 
                 if seq.valid is False:
@@ -303,10 +322,24 @@ class BasicSequenceData(object):
                 # Each example consumes [j, ..., endpoint], and predicts exactly
                 # target[endpoint].  No sample after endpoint is exposed.
                 final_start = min(targ.shape[0], feat.shape[0]) - self.seq_len * self.window_size + 1
+                candidate_endpoints = 0
+                invalid_endpoints = 0
                 for j in range(self.past_data_size, final_start, step_size):
+                    endpoint = j + self.seq_len * self.window_size - 1
+                    candidate_endpoints += 1
+                    if not seq.current_velocity_valid[endpoint]:
+                        invalid_endpoints += 1
+                        continue
                     index_map.append([valid_i, j, motion_type])
                     self.valid_all_samples += 1
                     valid_samples += 1
+                if seq.current_velocity_source == "position_difference":
+                    logging.info(
+                        "current velocity invalid endpoints: %d / %d (%.2f%%) in %s",
+                        invalid_endpoints, candidate_endpoints,
+                        100.0 * invalid_endpoints / candidate_endpoints if candidate_endpoints else 0.0,
+                        data_list[i],
+                    )
             elif self.mode in ["train", "val", "test"] and seq.get_gt is False:
                 for j in range(
                     self.past_data_size,

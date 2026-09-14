@@ -203,7 +203,14 @@ def GetBestModel(path):
     return model
 
 
-def build_trainer(args, cfg, model, resume_path, **kwargs):
+def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kwargs):
+    """Build a trainer with explicit warm-start versus resume semantics.
+
+    ``pretrained_path`` loads only model weights and starts a new run.  In
+    contrast, ``resume_path`` restores all serialized training state.
+    """
+    if pretrained_path and resume_path:
+        raise ValueError("--checkpoint and --resume_from cannot be used together")
     start_epoch = 0
     optim = (
         torch.optim.Adam
@@ -222,131 +229,50 @@ def build_trainer(args, cfg, model, resume_path, **kwargs):
     else:
         optimizer = optim(model.parameters(), opt_cfg["learning_rate"], weight_decay=opt_cfg["weight_decay"])
     resume_state = {}
-    if cfg["train"]["use_pretrain_model"]:
-        # Highlight model loading process
-        banner("LOADING MODEL FOR FINETUNING")
-
-        if resume_path:
-            checkpoint = torch.load(
-                resume_path, map_location="cpu", weights_only=False
-            )
-            success_highlight(f"✅ LOADING MODEL FROM SPECIFIED PATH: {resume_path}")
-        else:  # default resume form train out_dir
-            resume_path = GetBestModel(
-                os.path.join(cfg["train"]["out_dir"], "checkpoints")
-            )
-            checkpoint = torch.load(
-                resume_path, map_location="cpu", weights_only=False
-            )
-            success_highlight(f"✅ LOADING BEST MODEL FROM OUTPUT DIR: {resume_path}")
-
-        # Get model information
-        start_epoch = checkpoint.get("epoch", 0)
-        model_epoch = checkpoint.get("epoch", "Unknown")
-
-        # Create model information table
-        from rich import box
-        from rich.table import Table
-
-        model_table = Table(title="📊 Model Loading Information", box=box.ROUNDED)
-        model_table.add_column("Property", style="cyan", no_wrap=True)
-        model_table.add_column("Value", style="green")
-        model_table.add_column("Status", style="yellow")
-
-        model_table.add_row("Starting Epoch", str(start_epoch), "✅")
-        model_table.add_row("Model Epoch", str(model_epoch), "✅")
-        model_table.add_row("Checkpoint Path", str(resume_path), "✅")
-        model_table.add_row(
-            "GPU Mode",
-            "Multi-GPU" if cfg["train"]["use_multi_gpu"] else "Single-GPU",
-            "✅",
-        )
-
-        # Load model weights.  Current-velocity fine-tuning may intentionally
-        # replace only dog head; every other missing/mismatched tensor is an
-        # architecture compatibility error rather than a silent partial load.
+    source_path = resume_path or pretrained_path
+    # Preserve the established legacy config-only continuation behavior.  New
+    # CLI paths never infer one another: --checkpoint is always warm start and
+    # --resume_from is always resume.
+    legacy_resume = False
+    if not source_path and cfg["train"].get("use_pretrain_model", False):
+        source_path = GetBestModel(os.path.join(cfg["train"]["out_dir"], "checkpoints"))
+        legacy_resume = True
+    if source_path:
+        checkpoint = torch.load(source_path, map_location="cpu", weights_only=False)
+        is_resume = bool(resume_path) or legacy_resume
+        # Reinitializing a head is a warm-start option only. A resume must
+        # faithfully restore the already-running model.
+        reinit_head = (not is_resume and cfg["train"].get("dog_head_init", "pretrained") == "reinitialize")
         state_dict = checkpoint.get("model_state_dict", checkpoint)
-        reinit_head = cfg["train"].get("dog_head_init", "pretrained") == "reinitialize"
         model_state = model.state_dict()
         incompatible = [k for k, v in state_dict.items() if k in model_state and v.shape != model_state[k].shape]
         disallowed = [k for k in incompatible if not (reinit_head and k.startswith("heads.dog."))]
         if disallowed:
-            raise RuntimeError(f"Incompatible pretrained architecture tensors: {disallowed}")
-        missing_backbone = [k for k in model_state if k not in state_dict and not (reinit_head and k.startswith("heads.dog."))]
-        if missing_backbone:
-            raise RuntimeError(f"Checkpoint is missing required model tensors: {missing_backbone}")
+            raise RuntimeError(f"Incompatible checkpoint architecture tensors: {disallowed}")
+        missing = [k for k in model_state if k not in state_dict and not (reinit_head and k.startswith("heads.dog."))]
+        if missing:
+            raise RuntimeError(f"Checkpoint is missing required model tensors: {missing}")
         if reinit_head:
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith("heads.dog.")}
-        # Load model weights
-        if cfg["train"]["use_multi_gpu"]:
-            # Check if model is wrapped in DistributedDataParallel
-            if hasattr(model, "module"):
-                model.module.load_state_dict(
-                    state_dict, strict=not reinit_head
-                )
-                model_table.add_row("Model Weights", "Loaded (Multi-GPU)", "✅")
-            else:
-                model.load_state_dict(state_dict, strict=not reinit_head)
-                model_table.add_row("Model Weights", "Loaded (Single-GPU)", "✅")
+        target_model = model.module if cfg["train"].get("use_multi_gpu") and hasattr(model, "module") else model
+        target_model.load_state_dict(state_dict, strict=not reinit_head)
+
+        if is_resume:
+            start_epoch = checkpoint.get("epoch", 0)
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            resume_state = dict(checkpoint.get("trainer_state", {}))
+            resume_state["scheduler_state_dict"] = checkpoint.get("scheduler_state_dict", {})
+            resume_state["scaler_state_dict"] = checkpoint.get("scaler_state_dict", {})
+            logging.info("Training initialization mode: resume\nSource checkpoint: %s\nStarting epoch: %s\nOptimizer: restored\nScheduler: restored\nAMP scaler: restored", source_path, start_epoch)
         else:
-            model.load_state_dict(state_dict, strict=not reinit_head)
-            model_table.add_row("Model Weights", "Loaded (Single-GPU)", "✅")
-
-        # Load optimizer state if available
-        if "optimizer_state_dict" in checkpoint and not cfg["data"].get("velocity_target") == "current":
-            optimizer.load_state_dict(checkpoint.get("optimizer_state_dict"))
-            model_table.add_row("Optimizer State", "Loaded from checkpoint", "✅")
-        else:
-            model_table.add_row("Optimizer State", "Fresh optimizer (not found)", "⚠️")
-
-        if cfg["data"].get("velocity_target") == "current" and cfg["train"].get("freeze_backbone", False):
-            for name, parameter in model.named_parameters():
-                parameter.requires_grad = name.startswith("heads.dog.")
-            model_table.add_row("Phase 1", "dog head trainable; trunk/LSTM frozen", "✅")
-
-        # Restore trainer bookkeeping state if available
-        resume_state = checkpoint.get("trainer_state", {})
-        resume_state = dict(resume_state)
-        resume_state["scheduler_state_dict"] = checkpoint.get(
-            "scheduler_state_dict", {}
-        )
-        resume_state["scaler_state_dict"] = checkpoint.get("scaler_state_dict", {})
-        if resume_state:
-            model_table.add_row("Trainer State", "Restored checkpoint state", "✅")
-        else:
-            model_table.add_row("Trainer State", "No trainer state found", "⚠️")
-
-        # Display the table
-        from rich.console import Console
-
-        console = Console()
-        console.print(model_table)
-
-        success_highlight(f"🎯 READY TO CONTINUE TRAINING FROM EPOCH {start_epoch}")
+            logging.info("Training initialization mode: pretrained warm start\nSource checkpoint: %s\nStarting epoch: 0\nOptimizer: fresh\nScheduler: fresh\nAMP scaler: fresh", source_path)
     else:
-        # Create table for fresh training
-        from rich import box
-        from rich.table import Table
+        logging.info("Training initialization mode: fresh\nStarting epoch: 0\nOptimizer: fresh\nScheduler: fresh\nAMP scaler: fresh")
 
-        fresh_table = Table(title="🆕 Fresh Training Information", box=box.ROUNDED)
-        fresh_table.add_column("Property", style="cyan", no_wrap=True)
-        fresh_table.add_column("Value", style="green")
-        fresh_table.add_column("Status", style="yellow")
-
-        fresh_table.add_row("Training Mode", "Fresh Training", "🆕")
-        fresh_table.add_row("Starting Epoch", "0", "✅")
-        fresh_table.add_row("Model State", "Random Initialization", "✅")
-        fresh_table.add_row("Optimizer State", "Fresh Optimizer", "✅")
-        fresh_table.add_row(
-            "GPU Mode",
-            "Multi-GPU" if cfg["train"]["use_multi_gpu"] else "Single-GPU",
-            "✅",
-        )
-
-        from rich.console import Console
-
-        console = Console()
-        console.print(fresh_table)
+    if cfg["data"].get("velocity_target") == "current" and cfg["train"].get("freeze_backbone", False):
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = name.startswith("heads.dog.")
     return train.Trainer(
         args,
         cfg,

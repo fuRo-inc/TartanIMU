@@ -29,6 +29,8 @@ data:
   sample_freq: 40
   # Causal endpoint target: history [t_k-H, ..., t_k] -> v_B(t_k).
   velocity_target: current
+  # Position-difference fallback endpoints faster than this are excluded, not clipped.
+  current_velocity_max_speed: 10.0
 
   gravity_alignment:
     enabled: False
@@ -59,8 +61,8 @@ train:
 
   out_dir: ./exp_result/go2_tartanimu_finetune_v2
 
-  use_pretrain_model: True
-  # expert_dog.pt is preferred when available; passed via --resume_from.
+  use_pretrain_model: False
+  # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
   pretrained_source: expert_dog.pt
   dog_head_init: pretrained  # set reinitialize to compare a fresh velocity head
   freeze_backbone: true      # Phase 1; set false for Phase 2
