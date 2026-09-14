@@ -614,7 +614,9 @@ class ResNetLSTMSeqToSeqDataset(Dataset):
             # step_size = imu_freq / sample_freq (e.g., 200/20 = 10)
             # This downsamples from 200Hz to 20Hz
             if self.step_size > 1:
-                window_feat = window_feat[::self.step_size, :]  # [window_size/step_size, F]
+                offset = (len(window_feat) - 1) % self.step_size
+                window_feat = window_feat[offset::self.step_size]
+                # window_feat = window_feat[::self.step_size, :]  # [window_size/step_size, F]
             
             seq_feat.append(window_feat.T)  # Transpose to [F, downsampled_window_size]
             # Divide feat into ten segments, after downsampling: 0-20, 20-40, etc. (at 20Hz)
