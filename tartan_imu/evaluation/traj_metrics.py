@@ -65,21 +65,22 @@ def compute_full_trajectory_metrics(traj_attr_dict: dict, cfg: dict) -> dict:
     Returns:
         Dictionary of full trajectory metrics
     """
+    inference_rate = cfg["data"].get("sample_freq", cfg["data"]["imu_freq"])
     ate, t_rte, d_rte = compute_ate_rte(
         traj_attr_dict["pos_pred"],
         traj_attr_dict["pos_gt"],
-        int(cfg["data"]["imu_freq"] * 1),
+        int(inference_rate * 1),
     )
 
     ATE, AVE, P_RMSE, V_RMSE, X_ATE, Y_ATE, Z_ATE, X_AVE, Y_AVE, Z_AVE = (
         compute_accruacy_metrics(
             traj_attr_dict,
-            int(cfg["data"]["imu_freq"] * 1),
+            int(inference_rate * 1),
             cfg["data"]["use_local_coord"],
         )
     )
 
-    return {
+    result = {
         "ate": ate,
         "t_rte": t_rte,
         "d_rte": d_rte,
@@ -94,6 +95,12 @@ def compute_full_trajectory_metrics(traj_attr_dict: dict, cfg: dict) -> dict:
         "Y_AVE": Y_AVE,
         "Z_AVE": Z_AVE,
     }
+    if "velocity_metrics" in traj_attr_dict:
+        result.update(traj_attr_dict["velocity_metrics"])
+        result["final_displacement_error"] = float(
+            np.linalg.norm(traj_attr_dict["pos_pred"][-1] - traj_attr_dict["pos_gt"][-1])
+        )
+    return result
 
 
 def compute_overall_statistics(

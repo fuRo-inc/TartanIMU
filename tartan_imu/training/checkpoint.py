@@ -118,6 +118,7 @@ def save_model(
         # Use epoch checkpoint as primary path
         model_path = epoch_checkpoint
 
+        metadata = (trainer_state or {}).get("checkpoint_metadata", {})
         # Prepare state dict (handle both wrapped and unwrapped models)
         if hasattr(network, "module"):
             # Model is wrapped in DistributedDataParallel
@@ -128,6 +129,7 @@ def save_model(
                 "trainer_state": trainer_state or {},
                 "scheduler_state_dict": scheduler_state or {},
                 "scaler_state_dict": scaler_state or {},
+                "metadata": metadata,
             }
         else:
             # Model is not wrapped
@@ -138,6 +140,7 @@ def save_model(
                 "trainer_state": trainer_state or {},
                 "scheduler_state_dict": scheduler_state or {},
                 "scaler_state_dict": scaler_state or {},
+                "metadata": metadata,
             }
 
         # Save epoch-specific checkpoint

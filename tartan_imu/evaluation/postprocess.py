@@ -19,6 +19,39 @@ from scipy.interpolate import interp1d
 from scipy.spatial.transform import Rotation
 
 
+def integrate_current_body_velocity(ts, velocity_body, quat_xyzw, initial_pos=None):
+    """Causally recover world positions from current base velocities.
+
+    ``quat_xyzw[k]`` and ``velocity_body[k]`` are deliberately paired at the
+    same timestamp.  Variable step sizes and trapezoidal integration are used.
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    velocity_body = np.asarray(velocity_body, dtype=np.float64)
+    quat_xyzw = np.asarray(quat_xyzw, dtype=np.float64)
+    if len(ts) != len(velocity_body) or len(ts) != len(quat_xyzw) or len(ts) < 1:
+        raise ValueError("ts, velocity_body, and quat_xyzw must be aligned non-empty arrays")
+    if len(ts) > 1 and np.any(np.diff(ts) <= 0):
+        raise ValueError("integration timestamps must be strictly increasing")
+    velocity_world = Rotation.from_quat(quat_xyzw).apply(velocity_body)
+    positions = np.empty_like(velocity_world)
+    positions[0] = np.zeros(3) if initial_pos is None else initial_pos
+    for k, dt in enumerate(np.diff(ts)):
+        positions[k + 1] = positions[k] + 0.5 * (velocity_world[k] + velocity_world[k + 1]) * dt
+    return positions, velocity_world
+
+
+def current_velocity_metrics(predicted_body, target_body):
+    """Per-axis/current 3-D velocity errors used by Go2 evaluation."""
+    error = np.asarray(predicted_body) - np.asarray(target_body)
+    return {
+        "vx_rmse": float(np.sqrt(np.mean(error[:, 0] ** 2))),
+        "vy_rmse": float(np.sqrt(np.mean(error[:, 1] ** 2))),
+        "vz_rmse": float(np.sqrt(np.mean(error[:, 2] ** 2))),
+        "velocity_3d_rmse": float(np.sqrt(np.mean(np.sum(error ** 2, axis=1)))),
+        "velocity_bias": np.mean(error, axis=0),
+    }
+
+
 def recover_global_pose_from_local_velocity(
     ts, velocity_local, initial_pos, initial_quat
 ):
@@ -123,6 +156,26 @@ def align_trajectory_with_scale_and_rotation(pred_positions, gt_positions):
 
 
 def pose_integrate(cfg, dataset, preds_dict, use_local_coordinate=False):
+    if cfg.get("data", {}).get("velocity_target", cfg.get("model", {}).get("velocity_target", "window_mean")) == "current":
+        # Dataset examples are ordered at sample_freq; target/orientation are at
+        # the causal-history endpoint.  Never use the legacy midpoint offset.
+        endpoints = np.asarray([entry[1] + dataset.seq_len * dataset.window_size - 1 for entry in dataset.index_map])
+        ts = np.asarray(dataset.ts[0])[endpoints]
+        quat = np.asarray(preds_dict["orien"])
+        if quat.ndim == 3:
+            quat = quat[:, -1, :]
+        gt_pos = np.asarray(dataset.gt_pos[0])[endpoints]
+        pos_pred, pred_world = integrate_current_body_velocity(ts, preds_dict["preds"], quat, gt_pos[0])
+        pos_oracle, oracle_world = integrate_current_body_velocity(ts, preds_dict["targets"], quat, gt_pos[0])
+        return {
+            "ts": ts, "pred_ts": ts, "pos_pred": pos_pred, "pos_gt": gt_pos,
+            "pos_oracle": pos_oracle, "preds": preds_dict["preds"],
+            "targets": preds_dict["targets"], "pred_world_velocity": pred_world,
+            "oracle_world_velocity": oracle_world,
+            "vel_body_pred": preds_dict["preds"], "vel_body_gt": preds_dict["targets"],
+            "velocity_metrics": current_velocity_metrics(preds_dict["preds"], preds_dict["targets"]),
+            "pred_sigmas": np.exp(preds_dict["preds_cov"]),
+        }
     use_local_coordinate = cfg["data"]["use_local_coord"]
     preds = preds_dict["preds"]  # pose prediction
     preds_cov = preds_dict["preds_cov"]  # cov prediction

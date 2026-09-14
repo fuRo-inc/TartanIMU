@@ -59,15 +59,16 @@ def fun_train_forward(cfg, model, batch, start_cov_epochs, epoch):
             continue
             
         output_dim = cfg["model_param"]["output_dim"]  # 3
-        pred_multi_head[key] = pred_multi_head[key][
-            :,
-            cfg["train"]["predict_start"] :,
-        ]  # ['predict_start']->0   pred: [1, 10, 3]
+        pred_multi_head[key] = pred_multi_head[key][:, cfg["train"]["predict_start"] :]
         pred_multi_cov[key] = pred_multi_cov[key][
             :,
             cfg["train"]["predict_start"] :,
         ]  # pred_cov: [1, 10, 3]
         targ = targ[:, cfg["train"]["predict_start"] :, 0:output_dim]  # [1, 10, 3]
+        if cfg.get("data", {}).get("velocity_target", "window_mean") == "current":
+            pred_multi_head[key] = pred_multi_head[key][:, -1:]
+            pred_multi_cov[key] = pred_multi_cov[key][:, -1:]
+            targ = targ[:, -1:]
 
     # Note: Velocity scaling is now handled by learnable parameters in OutputHead
 
@@ -156,6 +157,10 @@ def fun_train_forward_efficient(cfg, model, batch, start_cov_epochs, epoch):
             cfg["train"]["predict_start"] :,
         ]
         targ = targ[:, cfg["train"]["predict_start"] :, 0:output_dim]
+        if cfg.get("data", {}).get("velocity_target", "window_mean") == "current":
+            pred_multi_head[key] = pred_multi_head[key][:, -1:]
+            pred_multi_cov[key] = pred_multi_cov[key][:, -1:]
+            targ = targ[:, -1:]
 
     # Note: Velocity scaling is now handled by learnable parameters in OutputHead
 
@@ -201,7 +206,7 @@ def get_needed_heads_from_motion_type(motion_type):
 
 def get_active_heads(cfg, motion_type):
     """Return heads to train; prefer config over batch inference."""
-    ah = cfg.get("active_heads", None)
+    ah = cfg.get("train", {}).get("active_heads", cfg.get("active_heads", None))
     if ah is not None and len(ah) > 0:
         return list(ah)
     # fallback (your existing behavior)
@@ -278,12 +283,13 @@ def fun_test_forward(cfg, model, batch, start_cov_epochs, epoch, past_kv=None, t
     targ = targ[:, -1, 0:output_dim]  # (B,3)
 
     imu_freq = int(cfg["data"]["imu_freq"])
-    orien = orien[
-        :,
-        -imu_freq:,
-    ]  # Take the ground truth rotation of the last window
+    if cfg.get("data", {}).get("velocity_target", "window_mean") == "current":
+        # Same timestamp as target: last raw IMU sample in the causal history.
+        orien = orien[:, -1, :]
+    else:
+        orien = orien[:, -imu_freq:]
     
-    if cfg["model"]["pred_velocity"]:
+    if cfg["model"]["pred_velocity"] and cfg.get("data", {}).get("velocity_target", "window_mean") != "current":
         pred = pred * cfg["model_param"]["window_time"]
         pred_cov = (
             torch.log(cfg["model_param"]["window_time"] * torch.ones_like(pred_cov))

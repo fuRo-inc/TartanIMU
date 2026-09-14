@@ -174,6 +174,16 @@ class Trainer:
             "best_val_loss": self.best_val_loss,
             "best_train_loss": self.best_train_loss,
             "last_save_epoch": self.last_save_epoch,
+            "checkpoint_metadata": {
+                "velocity_target": self.cfg.get("data", {}).get("velocity_target", "window_mean"),
+                "history_duration_s": self.cfg["train"]["seq_len"] * self.cfg["model_param"]["window_time"],
+                "seq_len": self.cfg["train"]["seq_len"],
+                "imu_frequency_hz": self.cfg["data"]["imu_freq"],
+                "sample_frequency_hz": self.cfg["data"]["sample_freq"],
+                "output_frame": "base" if self.cfg.get("data", {}).get("velocity_target") == "current" else "legacy",
+                "training_source_checkpoint": self.cfg["train"].get("pretrained_source"),
+                "dog_head_initialization": self.cfg["train"].get("dog_head_init", "pretrained"),
+            },
         }
 
     def _setup_scheduler(self):

@@ -15,6 +15,8 @@ from torch.utils.data import Dataset
 from tartan_imu.dataloader._common import (
     calculate_velocity_from_poses,
     clip_velocity_outliers,
+    current_velocity_from_positions,
+    world_to_body_velocity,
 )
 from tartan_imu.utils.constants import GRAVITY
 
@@ -29,6 +31,7 @@ class AirLabNPZSequence(object):
         use_local_coord=False,
         mode="test",
         plot=False,
+        velocity_target="window_mean",
     ):
         super().__init__()
         (
@@ -51,6 +54,7 @@ class AirLabNPZSequence(object):
         self.mode = mode
         self.use_local_coord = use_local_coord
         self.motion_type = None
+        self.velocity_target = velocity_target
 
         if data_path is not None:
             self.valid = self.load(data_path, verbose=verbose)
@@ -95,9 +99,19 @@ class AirLabNPZSequence(object):
         accel_body = imu[:, :3]
         angular_vel_body = imu[:, 3:]
 
-        velocity_global, velocity_body = calculate_velocity_from_poses(
-            ts, pos, quat
-        )  # use the ground truth to calculate the velocity in global and local coordinate system
+        # Current-velocity mode uses a per-timestamp derivative.  Prefer a
+        # simulator-provided root/base world velocity when present.
+        direct_velocity_keys = ("root_linear_velocity", "base_linear_velocity",
+                                "root_velocity_world", "base_velocity_world")
+        direct_key = next((key for key in direct_velocity_keys if key in all_data), None)
+        if direct_key is not None:
+            velocity_global_current = np.asarray(all_data[direct_key], dtype=np.float64)
+            if velocity_global_current.shape != pos.shape:
+                raise ValueError(f"{direct_key} must have shape {pos.shape}, got {velocity_global_current.shape}")
+        else:
+            velocity_global_current = current_velocity_from_positions(ts, pos)
+        velocity_body_current = world_to_body_velocity(velocity_global_current, quat)
+        velocity_global, velocity_body = calculate_velocity_from_poses(ts, pos, quat)
 
         # Clip physically-impossible GT velocity spikes (TartanIMU car/dog have
         # position jumps -> up to ~210 m/s). One spike integrates into a metres
@@ -166,20 +180,25 @@ class AirLabNPZSequence(object):
         if not self.use_local_coord:
             self.targets = gt_disp
         else:
-            # Body-frame target = mean body velocity over each window of `interval` frames.
-            num_windows = velocity_body.shape[0] - self.interval + 1
-            vel_body_mean = np.zeros((num_windows, velocity_body.shape[1]))
-            for i in range(num_windows):
-                window = velocity_body[i : i + self.interval]
-                vel_body_mean[i] = np.mean(window, axis=0, keepdims=True)
-            self.targets = vel_body_mean
+            if self.velocity_target == "current":
+                # Target index is the same raw timestamp as the causal history endpoint.
+                self.targets = velocity_body_current
+            elif self.velocity_target == "window_mean":
+                num_windows = velocity_body.shape[0] - self.interval + 1
+                vel_body_mean = np.zeros((num_windows, velocity_body.shape[1]))
+                for i in range(num_windows):
+                    vel_body_mean[i] = np.mean(velocity_body[i : i + self.interval], axis=0)
+                self.targets = vel_body_mean
+            else:
+                raise ValueError(f"Unknown velocity_target: {self.velocity_target}")
 
         self.ts = self.ts[:-1]  # N*3
         self.features = self.features[:-1]  # N*6
         self.orientations = self.orientations[:-1]  # N*4
         self.pos_gt = self.pos_gt[:-1]  # N*3
         self.gt_ori = self.gt_ori[:-1]  # N*4
-        self.targets = self.targets[:-1]  # (N-200)*3
+        if self.velocity_target == "window_mean":
+            self.targets = self.targets[:-1]
         self.velocity_body = velocity_body  # N*3
         return True
 
@@ -221,6 +240,9 @@ class BasicSequenceData(object):
         self.data_paths = []
         self.valid_continue_good_time = 0.1
         self.use_local_coord = cfg["data"]["use_local_coord"]
+        self.velocity_target = cfg["data"].get("velocity_target", cfg.get("model", {}).get("velocity_target", "window_mean"))
+        if self.velocity_target == "current" and (self.past_data_size or self.future_data_size):
+            raise ValueError("current velocity mode requires past_time=future_time=0; input history must be causal")
         self.mode = kwargs.get("mode", "train")
 
         sum_t = 0
@@ -248,6 +270,7 @@ class BasicSequenceData(object):
                     verbose=verbose,
                     use_local_coord=self.use_local_coord,
                     mode=self.mode,
+                    velocity_target=self.velocity_target,
                 )
 
                 if seq.valid is False:
@@ -276,7 +299,15 @@ class BasicSequenceData(object):
             index_map = []
             step_size = self.step_size  # 5
 
-            if self.mode in ["train", "val", "test"] and seq.get_gt is False:
+            if self.velocity_target == "current":
+                # Each example consumes [j, ..., endpoint], and predicts exactly
+                # target[endpoint].  No sample after endpoint is exposed.
+                final_start = min(targ.shape[0], feat.shape[0]) - self.seq_len * self.window_size + 1
+                for j in range(self.past_data_size, final_start, step_size):
+                    index_map.append([valid_i, j, motion_type])
+                    self.valid_all_samples += 1
+                    valid_samples += 1
+            elif self.mode in ["train", "val", "test"] and seq.get_gt is False:
                 for j in range(
                     self.past_data_size,
                     targ.shape[0]
@@ -379,6 +410,7 @@ class ResNetLSTMSeqToSeqDataset(Dataset):
         self.feat_acc_sigma = cfg["augment"]["feat_acc_sigma"]  # 0.0001
         self.feat_gyr_sigma = cfg["augment"]["feat_gyr_sigma"]  # 1e-05
         self.use_local_coord = cfg["data"]["use_local_coord"]
+        self.velocity_target = cfg["data"].get("velocity_target", cfg.get("model", {}).get("velocity_target", "window_mean"))
 
         # Time-scaling invariance settings
         self.add_time_scaling = cfg["augment"].get("add_time_scaling", False)
@@ -488,9 +520,13 @@ class ResNetLSTMSeqToSeqDataset(Dataset):
         #     targ = self.targets[seq_id][frame_id : frame_id + self.seq_len * self.window_size: self.window_size]
         # else: #global pos diff
 
-        targ = self.targets[seq_id][
-            frame_id : frame_id + self.seq_len * self.window_size : self.window_size
-        ]  # the beginning of the sequence 10*3 local coordinate system targ is the body velocity mean in 0-200 200-400 400-600
+        if self.velocity_target == "current":
+            endpoint = frame_id + self.seq_len * self.window_size - 1
+            # Keep [seq_len, 3] API for the existing architecture, but only the
+            # last element is consumed by the current-velocity loss.
+            targ = np.repeat(self.targets[seq_id][endpoint][None, :], self.seq_len, axis=0)
+        else:
+            targ = self.targets[seq_id][frame_id : frame_id + self.seq_len * self.window_size : self.window_size]
         ori = self.gt_ori[seq_id][
             frame_id : frame_id + self.seq_len * self.window_size
         ]  # 2000*4 gt orientation

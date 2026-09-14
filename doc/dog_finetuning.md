@@ -62,7 +62,10 @@ imu_freq = 200 Hz
 
 # 2. Fine-tuningの方針
 
-最初のbaselineでは、TartanIMU本来の出力だけをfine-tuningします。
+Go2 fine-tuning は legacy TartanIMU の target と異なります。legacy は
+**1-second window の body-frame velocity 平均**、Go2 は causal IMU history
+`[t_k-H, ..., t_k]` からの **current base-frame velocity** `v_B(t_k)` です。
+未来 IMU は入力しません。
 
 入力:
 
@@ -77,6 +80,37 @@ imu_freq = 200 Hz
 ```text
 body-frame linear velocity
 [vx, vy, vz]
+```
+
+world velocity と trajectory はモデル外部の attitude estimate（評価時は GT
+quaternion, `xyzw`）で復元します。
+
+```text
+v_B(t) = R_WB(t)^T v_W(t)
+v_W(t) = R_WB(t) v_B(t)
+p_W(t) = p_W(t0) + integral R_WB(t) v_B(t) dt
+```
+
+評価器は各 40 Hz endpoint で current orientation を使い、実際の隣接 timestamp
+から得た `dt` で台形積分します。`GT current body velocity + GT orientation` の
+oracle trajectory も同じ path で出力されるので、学習誤差と座標/積分誤差を分離できます。
+
+## Current-velocity 実行例
+
+Phase 1（dog head のみ）:
+
+```bash
+python train.py --config config/datasets/tartanimu/go2_finetune.yaml --resume_from tartan_imu_weights/checkpoints/expert_dog.pt
+```
+
+Phase 2 は config の `train.freeze_backbone: false` にし、`backbone_learning_rate`
+と `head_learning_rate` を使います。平均速度 head の影響を比較するには
+`train.dog_head_init: reinitialize` を設定します。
+
+評価:
+
+```bash
+python test.py --config config/datasets/tartanimu/go2_finetune.yaml --resume_from <go2_checkpoint.pt>
 ```
 
 今回は追加しません。

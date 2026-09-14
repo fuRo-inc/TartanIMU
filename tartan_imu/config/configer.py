@@ -210,11 +210,17 @@ def build_trainer(args, cfg, model, resume_path, **kwargs):
         if cfg["train"]["optimizer"]["method"] == "Adam"
         else torch.optim.SGD
     )  # Adam
-    optimizer = optim(
-        model.parameters(),
-        cfg["train"]["optimizer"]["learning_rate"],  # 0.0001
-        weight_decay=cfg["train"]["optimizer"]["weight_decay"],
-    )  # 0.0
+    opt_cfg = cfg["train"]["optimizer"]
+    # Separate parameter groups make Phase 2's low-LR trunk tuning explicit.
+    if cfg["data"].get("velocity_target") == "current":
+        backbone = [p for n, p in model.named_parameters() if not n.startswith("heads.dog.")]
+        dog_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.")]
+        optimizer = optim([
+            {"params": [p for p in backbone if p.requires_grad], "lr": opt_cfg.get("backbone_learning_rate", opt_cfg["learning_rate"])},
+            {"params": [p for p in dog_head if p.requires_grad], "lr": opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"])},
+        ], weight_decay=opt_cfg["weight_decay"])
+    else:
+        optimizer = optim(model.parameters(), opt_cfg["learning_rate"], weight_decay=opt_cfg["weight_decay"])
     resume_state = {}
     if cfg["train"]["use_pretrain_model"]:
         # Highlight model loading process
@@ -256,27 +262,47 @@ def build_trainer(args, cfg, model, resume_path, **kwargs):
             "✅",
         )
 
+        # Load model weights.  Current-velocity fine-tuning may intentionally
+        # replace only dog head; every other missing/mismatched tensor is an
+        # architecture compatibility error rather than a silent partial load.
+        state_dict = checkpoint.get("model_state_dict", checkpoint)
+        reinit_head = cfg["train"].get("dog_head_init", "pretrained") == "reinitialize"
+        model_state = model.state_dict()
+        incompatible = [k for k, v in state_dict.items() if k in model_state and v.shape != model_state[k].shape]
+        disallowed = [k for k in incompatible if not (reinit_head and k.startswith("heads.dog."))]
+        if disallowed:
+            raise RuntimeError(f"Incompatible pretrained architecture tensors: {disallowed}")
+        missing_backbone = [k for k in model_state if k not in state_dict and not (reinit_head and k.startswith("heads.dog."))]
+        if missing_backbone:
+            raise RuntimeError(f"Checkpoint is missing required model tensors: {missing_backbone}")
+        if reinit_head:
+            state_dict = {k: v for k, v in state_dict.items() if not k.startswith("heads.dog.")}
         # Load model weights
         if cfg["train"]["use_multi_gpu"]:
             # Check if model is wrapped in DistributedDataParallel
             if hasattr(model, "module"):
                 model.module.load_state_dict(
-                    checkpoint.get("model_state_dict"), strict=False
+                    state_dict, strict=not reinit_head
                 )
                 model_table.add_row("Model Weights", "Loaded (Multi-GPU)", "✅")
             else:
-                model.load_state_dict(checkpoint.get("model_state_dict"), strict=False)
+                model.load_state_dict(state_dict, strict=not reinit_head)
                 model_table.add_row("Model Weights", "Loaded (Single-GPU)", "✅")
         else:
-            model.load_state_dict(checkpoint.get("model_state_dict"), strict=False)
+            model.load_state_dict(state_dict, strict=not reinit_head)
             model_table.add_row("Model Weights", "Loaded (Single-GPU)", "✅")
 
         # Load optimizer state if available
-        if "optimizer_state_dict" in checkpoint:
+        if "optimizer_state_dict" in checkpoint and not cfg["data"].get("velocity_target") == "current":
             optimizer.load_state_dict(checkpoint.get("optimizer_state_dict"))
             model_table.add_row("Optimizer State", "Loaded from checkpoint", "✅")
         else:
             model_table.add_row("Optimizer State", "Fresh optimizer (not found)", "⚠️")
+
+        if cfg["data"].get("velocity_target") == "current" and cfg["train"].get("freeze_backbone", False):
+            for name, parameter in model.named_parameters():
+                parameter.requires_grad = name.startswith("heads.dog.")
+            model_table.add_row("Phase 1", "dog head trainable; trunk/LSTM frozen", "✅")
 
         # Restore trainer bookkeeping state if available
         resume_state = checkpoint.get("trainer_state", {})

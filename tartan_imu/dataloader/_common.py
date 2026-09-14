@@ -51,6 +51,30 @@ def calculate_velocity_from_poses(
     return velocity_global, velocity_body
 
 
+def current_velocity_from_positions(ts: np.ndarray, pos: np.ndarray) -> np.ndarray:
+    """Per-timestamp world velocity using central differences where possible.
+
+    Unlike the legacy helper this returns one velocity for every input timestamp;
+    it is deliberately not a long-window average.
+    """
+    ts = np.asarray(ts, dtype=np.float64)
+    pos = np.asarray(pos, dtype=np.float64)
+    if ts.ndim != 1 or pos.ndim != 2 or pos.shape[0] != len(ts) or len(ts) < 2:
+        raise ValueError("ts and pos must be aligned arrays with at least two samples")
+    if np.any(np.diff(ts) <= 0):
+        raise ValueError("timestamps must be strictly increasing")
+    velocity = np.empty_like(pos, dtype=np.float64)
+    velocity[0] = (pos[1] - pos[0]) / (ts[1] - ts[0])
+    velocity[-1] = (pos[-1] - pos[-2]) / (ts[-1] - ts[-2])
+    velocity[1:-1] = (pos[2:] - pos[:-2]) / (ts[2:, None] - ts[:-2, None])
+    return velocity
+
+
+def world_to_body_velocity(velocity_world: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
+    """Convert current world velocity to current body/base velocity (xyzw quat)."""
+    return Rotation.from_quat(quat_xyzw).inv().apply(velocity_world)
+
+
 def clip_velocity_outliers(
     velocity: np.ndarray, max_speed: float = 15.0
 ) -> np.ndarray:
