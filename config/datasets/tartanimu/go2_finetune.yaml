@@ -57,15 +57,15 @@ model:
   adapter: False
 
 train:
-  experiment_name: go2_tartanimu_finetune_v2
+  experiment_name: go2_tartanimu_finetune_v3
 
-  out_dir: ./exp_result/go2_tartanimu_finetune_v2
+  out_dir: ./exp_result/go2_tartanimu_finetune_v3
 
   use_pretrain_model: False
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
   pretrained_source: expert_dog.pt
   dog_head_init: pretrained  # set reinitialize to compare a fresh velocity head
-  freeze_backbone: true      # Phase 1; set false for Phase 2
+  freeze_backbone: False      # Phase 1; set false for Phase 2
   use_multi_gpu: False
   use_amp: True
 
@@ -102,10 +102,11 @@ val:
   n_workers: 2
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v2
+  out_dir: ./exp_result/go2_tartanimu_finetune_v3
   n_workers: 2
 
 schemes:
   train: True
+  online_adaption: False
+  offline_finetune: True
   test: False
-  online_adaption: True # False

@@ -575,7 +575,15 @@ def main(rank: int, world_size: int, args, resume_path, model_path, cfg):
                 args, cfg, model, pretrained_path=model_path, resume_path=resume_path
             )
 
-            if cfg["schemes"]["online_adaption"]:
+            if cfg["schemes"]["offline_finetune"]:
+                trainer.offline_finetune(
+                    train_loader=train_loader,
+                    val_loader=val_loader,
+                    test_loader=test_loader,
+                    max_epochs=cfg["train"].get("finetune_epochs", 20),
+                )
+
+            elif cfg["schemes"]["online_adaption"]:
                 # Online adaptation mode
                 logging.info("Starting online adaptation")
                 # Create a proper tester for online adaptation

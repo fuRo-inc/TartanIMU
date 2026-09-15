@@ -682,8 +682,11 @@ class Trainer:
 
         # Freeze backbone parameters for finetuning (only once)
         if not hasattr(self, "_backbone_frozen"):
-            self.model = freeze_backbone_parameters(self.model)
-            logging.info("Backbone parameters frozen for finetuning")
+            if self.cfg["model"].get("adapter") == "lora":
+                lora.mark_only_lora_as_trainable(self.model)
+                lora.print_lora_parameters(self.model)
+            else:
+                self.model = freeze_backbone_parameters(self.model)
             self._backbone_frozen = True
 
         # Track finetuning progress

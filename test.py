@@ -270,8 +270,25 @@ class tester(object):
             self.cfg, test_dataset, net_attr_dict, self.cfg["data"]["use_local_coord"]
         )
 
+        print("\n=== AFTER pose_integrate ===")
+        print("traj_attr_dict keys:", list(traj_attr_dict.keys()))
+        print("cov_pred exists:", "cov_pred" in traj_attr_dict)
+
+        if "cov_pred" in traj_attr_dict:
+            print("cov_pred type :", type(traj_attr_dict["cov_pred"]))
+            print("cov_pred shape:", traj_attr_dict["cov_pred"].shape)
+
         # Segment trajectory after inference
         trajectory_segments = segment_trajectory_5m(traj_attr_dict, segment_length)
+
+        print("\n=== AFTER segment_trajectory_5m ===")
+        print("num segments:", len(trajectory_segments))
+
+        for i, segment in enumerate(trajectory_segments):
+            print(f"segment[{i}] keys:", list(segment.keys()))
+            print(f"segment[{i}] cov_pred exists:", "cov_pred" in segment)
+            if "cov_pred" in segment:
+                print(f"segment[{i}] cov_pred shape:", segment["cov_pred"].shape)
 
         # Apply drift correction to each segment
         corrected_segments = []
@@ -287,6 +304,9 @@ class tester(object):
             corrected_segment = segment.copy()
             corrected_segment["pos_pred"] = pos_pred_corrected
 
+            print("\n=== CORRECTED SEGMENT ===")
+            print("corrected_segment keys:", list(corrected_segment.keys()))
+            print("cov_pred exists:", "cov_pred" in corrected_segment)
             corrected_segments.append(corrected_segment)
 
         # Apply drift correction to the FULL trajectory for visualization
