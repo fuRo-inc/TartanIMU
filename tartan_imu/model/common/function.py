@@ -16,7 +16,77 @@ from tartan_imu.model.common.losses import (
     efficient_multi_head_smooth_loss,
     get_sequence_smooth_loss,
     multi_head_smooth_loss,
+    single_head_velocity_loss,
 )
+from tartan_imu.model.common.velocity_covariance import gaussian_velocity_nll
+
+
+_LAST_COVARIANCE_METRICS = {}
+
+
+def get_last_covariance_metrics():
+    """Return scalar diagnostics from the latest full-covariance forward pass."""
+    return dict(_LAST_COVARIANCE_METRICS)
+
+
+def _full_velocity_covariance_enabled(cfg):
+    return bool(cfg.get("model", {}).get("velocity_covariance", {}).get("enabled", False)
+                and cfg.get("train", {}).get("covariance", {}).get("enabled", False))
+
+
+def _full_covariance_loss(cfg, predictions, raw_covariances, target, masks):
+    """Combine existing body-frame velocity loss with full Gaussian NLL."""
+    global _LAST_COVARIANCE_METRICS
+    cov_cfg = cfg["train"]["covariance"]
+    model_cov_cfg = cfg["model"]["velocity_covariance"]
+    eps = float(model_cov_cfg.get("eps", 1.0e-4))
+    detach = bool(cov_cfg.get("detach_velocity_for_covariance_loss", True))
+    weight = float(cov_cfg.get("loss_weight", 1.0))
+    use_speed_weighting = bool(cov_cfg.get("apply_speed_weighting", False))
+    velocity_cfg = _current_velocity_loss_config(cfg)
+    total_velocity = total_nll = total_nis = 0.0
+    count = 0
+    diag_values, offdiag_values, chol_values = [], [], []
+    for name, prediction in predictions.items():
+        mask = masks.get(name)
+        if mask is None or not mask.any():
+            continue
+        # target is the dataset's local/body-frame v_B target; no world rotation.
+        velocity_term = single_head_velocity_loss(
+            prediction, raw_covariances[name], target, velocity_loss_config=velocity_cfg
+        )["loss"].mean(dim=-1)
+        nll, nis, L = gaussian_velocity_nll(
+            prediction, target, raw_covariances[name], eps, detach
+        )
+        if use_speed_weighting:
+            nll = nll * single_head_velocity_loss(
+                prediction, raw_covariances[name], target, velocity_loss_config=velocity_cfg
+            )["speed_weight"].squeeze(-1)
+        active = mask.bool().view(-1, 1).expand_as(nll)
+        total_velocity = total_velocity + velocity_term[active].mean()
+        total_nll = total_nll + nll[active].mean()
+        total_nis = total_nis + nis[active].mean()
+        active_L = L[active]
+        covariance = active_L @ active_L.transpose(-1, -2)
+        diag_values.append(torch.sqrt(torch.diagonal(covariance, dim1=-2, dim2=-1)))
+        offdiag_values.append(covariance[..., [0, 0, 1], [1, 2, 2]].abs())
+        chol_values.append(torch.diagonal(active_L, dim1=-2, dim2=-1))
+        count += 1
+    if count == 0:
+        raise RuntimeError("No active head samples for full velocity covariance loss")
+    total_velocity, total_nll, total_nis = total_velocity / count, total_nll / count, total_nis / count
+    std = torch.cat(diag_values).mean(dim=0)
+    offdiag = torch.cat(offdiag_values).mean(dim=0)
+    chol = torch.cat(chol_values)
+    _LAST_COVARIANCE_METRICS = {
+        "velocity_loss": float(total_velocity.detach()), "covariance_nll": float(total_nll.detach()),
+        "total_loss": float((total_velocity + weight * total_nll).detach()), "nis": float(total_nis.detach()),
+        "std_x": float(std[0]), "std_y": float(std[1]), "std_z": float(std[2]),
+        "cov_xx": float(std[0].square()), "cov_yy": float(std[1].square()), "cov_zz": float(std[2].square()),
+        "abs_cov_xy": float(offdiag[0]), "abs_cov_xz": float(offdiag[1]), "abs_cov_yz": float(offdiag[2]),
+        "min_cholesky_diagonal": float(chol.min()), "max_cholesky_diagonal": float(chol.max()),
+    }
+    return total_velocity + weight * total_nll
 
 
 def _current_velocity_loss_config(cfg):
@@ -44,7 +114,7 @@ def fun_train_forward(cfg, model, batch, start_cov_epochs, epoch):
         batch  # feat: [batch_size, seq_len, 6, frames], targ: [batch_size, seq_len, 3]
     )
 
-    if epoch <= start_cov_epochs:  # Before covariance prediction
+    if epoch <= start_cov_epochs and not _full_velocity_covariance_enabled(cfg):  # Before covariance prediction
         pred_multi_head = model(feat, motion_type)  # Use motion_type for optimization
         pred_multi_cov = {}
         for key, value in pred_multi_head.items():
@@ -79,16 +149,13 @@ def fun_train_forward(cfg, model, batch, start_cov_epochs, epoch):
 
     # Note: Velocity scaling is now handled by learnable parameters in OutputHead
 
-    loss = multi_head_smooth_loss(
-        pred_multi_head,
-        pred_multi_cov,
-        targ,
-        epoch,
-        multi_head_mask,
-        start_cov_epochs,
-        cfg["data"]["use_local_coord"],
-        _current_velocity_loss_config(cfg),
-    )
+    if _full_velocity_covariance_enabled(cfg):
+        loss = _full_covariance_loss(cfg, pred_multi_head, pred_multi_cov, targ, multi_head_mask)
+    else:
+        loss = multi_head_smooth_loss(
+            pred_multi_head, pred_multi_cov, targ, epoch, multi_head_mask,
+            start_cov_epochs, cfg["data"]["use_local_coord"], _current_velocity_loss_config(cfg),
+        )
 
     last_key = None
     for key in list(pred_multi_head.keys()):
@@ -111,7 +178,7 @@ def fun_train_forward_efficient(cfg, model, batch, start_cov_epochs, epoch):
 
     needed_heads = get_active_heads(cfg, motion_type)
 
-    if epoch <= start_cov_epochs:
+    if epoch <= start_cov_epochs and not _full_velocity_covariance_enabled(cfg):
         # Only compute predictions for needed heads
         outputs = model(feat, motion_type, compute_all_heads=False)
         if isinstance(outputs, dict):
@@ -172,16 +239,19 @@ def fun_train_forward_efficient(cfg, model, batch, start_cov_epochs, epoch):
 
     # Note: Velocity scaling is now handled by learnable parameters in OutputHead
 
-    loss = efficient_multi_head_smooth_loss(
-        pred_multi_head,
-        pred_multi_cov,
-        targ,
-        epoch,
-        multi_head_mask,
-        start_cov_epochs,
-        cfg["data"]["use_local_coord"],
-        _current_velocity_loss_config(cfg),
-    )
+    if _full_velocity_covariance_enabled(cfg):
+        loss = _full_covariance_loss(cfg, pred_multi_head, pred_multi_cov, targ, multi_head_mask)
+    else:
+        loss = efficient_multi_head_smooth_loss(
+            pred_multi_head,
+            pred_multi_cov,
+            targ,
+            epoch,
+            multi_head_mask,
+            start_cov_epochs,
+            cfg["data"]["use_local_coord"],
+            _current_velocity_loss_config(cfg),
+        )
 
     last_key = None
     for key in list(pred_multi_head.keys()):
@@ -253,7 +323,7 @@ def fun_test_forward(cfg, model, batch, start_cov_epochs, epoch, past_kv=None, t
     # Check if model supports KV cache
     use_kv_cache = cfg.get("model_param", {}).get("use_kv_cache", False)
     
-    if epoch <= start_cov_epochs:
+    if epoch <= start_cov_epochs and not _full_velocity_covariance_enabled(cfg):
         if use_kv_cache:
             outputs = model(feat, motion_type, past_kv=past_kv, time_offset=time_offset)
             pred_multi_head = outputs
@@ -309,13 +379,17 @@ def fun_test_forward(cfg, model, batch, start_cov_epochs, epoch, past_kv=None, t
         # from tartan_imu.model.common.losses import smooth_velocity_predictions
         # pred = smooth_velocity_predictions(pred, window_size=3)
 
-    loss = get_sequence_smooth_loss(
-        pred,
-        pred_cov,
-        targ,
-        epoch,
-        start_cov_epochs,
-        velocity_loss_config=_current_velocity_loss_config(cfg),
-    )
+    if _full_velocity_covariance_enabled(cfg):
+        nll, _, _ = gaussian_velocity_nll(
+            pred, targ, pred_cov,
+            float(cfg["model"]["velocity_covariance"].get("eps", 1.0e-4)),
+            bool(cfg["train"]["covariance"].get("detach_velocity_for_covariance_loss", True)),
+        )
+        loss = nll.mean()
+    else:
+        loss = get_sequence_smooth_loss(
+            pred, pred_cov, targ, epoch, start_cov_epochs,
+            velocity_loss_config=_current_velocity_loss_config(cfg),
+        )
 
     return pred, pred_cov, targ, orien, loss, present_kv

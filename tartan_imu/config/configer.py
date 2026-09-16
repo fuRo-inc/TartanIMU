@@ -211,6 +211,21 @@ def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kw
     """
     if pretrained_path and resume_path:
         raise ValueError("--checkpoint and --resume_from cannot be used together")
+    full_covariance = bool(
+        cfg.get("model", {}).get("velocity_covariance", {}).get("enabled", False)
+        and cfg.get("train", {}).get("covariance", {}).get("enabled", False)
+    )
+    covariance_train_cfg = cfg.get("train", {}).get("covariance", {})
+    if full_covariance:
+        # This is applied before optimizer construction so Stage 1 contains
+        # only the new dog covariance head in its trainable parameter group.
+        freeze_backbone = covariance_train_cfg.get("freeze_backbone", False)
+        freeze_velocity_head = covariance_train_cfg.get("freeze_velocity_head", False)
+        for name, parameter in model.named_parameters():
+            is_dog_covariance = name.startswith("heads.dog.velocity_covariance_head.")
+            is_dog_velocity = name.startswith("heads.dog.") and not is_dog_covariance
+            parameter.requires_grad = is_dog_covariance or (is_dog_velocity and not freeze_velocity_head) or (not freeze_backbone and not name.startswith("heads.dog."))
+        logging.info("Full covariance freeze policy: backbone=%s velocity_head=%s; covariance head always trainable", freeze_backbone, freeze_velocity_head)
     start_epoch = 0
     optim = (
         torch.optim.Adam
@@ -221,11 +236,15 @@ def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kw
     # Separate parameter groups make Phase 2's low-LR trunk tuning explicit.
     if cfg["data"].get("velocity_target") == "current":
         backbone = [p for n, p in model.named_parameters() if not n.startswith("heads.dog.")]
-        dog_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.")]
-        optimizer = optim([
+        dog_velocity_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.") and ".velocity_covariance_head." not in n]
+        dog_covariance_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.velocity_covariance_head.")]
+        groups = [
             {"params": [p for p in backbone if p.requires_grad], "lr": opt_cfg.get("backbone_learning_rate", opt_cfg["learning_rate"])},
-            {"params": [p for p in dog_head if p.requires_grad], "lr": opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"])},
-        ], weight_decay=opt_cfg["weight_decay"])
+            {"params": [p for p in dog_velocity_head if p.requires_grad], "lr": opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"])},
+        ]
+        if full_covariance:
+            groups.append({"params": [p for p in dog_covariance_head if p.requires_grad], "lr": covariance_train_cfg.get("head_learning_rate", opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"]))})
+        optimizer = optim(groups, weight_decay=opt_cfg["weight_decay"])
     else:
         optimizer = optim(model.parameters(), opt_cfg["learning_rate"], weight_decay=opt_cfg["weight_decay"])
     resume_state = {}
@@ -249,13 +268,24 @@ def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kw
         disallowed = [k for k in incompatible if not (reinit_head and k.startswith("heads.dog."))]
         if disallowed:
             raise RuntimeError(f"Incompatible checkpoint architecture tensors: {disallowed}")
-        missing = [k for k in model_state if k not in state_dict and not (reinit_head and k.startswith("heads.dog."))]
+        allowed_new_covariance = lambda key: full_covariance and key.startswith("heads.") and ".velocity_covariance_head." in key
+        missing = [k for k in model_state if k not in state_dict and not (reinit_head and k.startswith("heads.dog.")) and not allowed_new_covariance(k)]
         if missing:
             raise RuntimeError(f"Checkpoint is missing required model tensors: {missing}")
         if reinit_head:
             state_dict = {k: v for k, v in state_dict.items() if not k.startswith("heads.dog.")}
         target_model = model.module if cfg["train"].get("use_multi_gpu") and hasattr(model, "module") else model
-        target_model.load_state_dict(state_dict, strict=not reinit_head)
+        if full_covariance and not is_resume:
+            # Strict=False is deliberately constrained by the checks above:
+            # only newly introduced covariance-head tensors may be missing.
+            incompatible_keys = target_model.load_state_dict(state_dict, strict=False)
+            unexpected = [k for k in incompatible_keys.unexpected_keys]
+            unexpected_non_cov = [k for k in unexpected if not allowed_new_covariance(k)]
+            missing_non_cov = [k for k in incompatible_keys.missing_keys if not allowed_new_covariance(k)]
+            if unexpected_non_cov or missing_non_cov:
+                raise RuntimeError(f"Unexpected checkpoint mismatch: missing={missing_non_cov}, unexpected={unexpected_non_cov}")
+        else:
+            target_model.load_state_dict(state_dict, strict=not reinit_head)
 
         if is_resume:
             start_epoch = checkpoint.get("epoch", 0)
@@ -270,7 +300,7 @@ def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kw
     else:
         logging.info("Training initialization mode: fresh\nStarting epoch: 0\nOptimizer: fresh\nScheduler: fresh\nAMP scaler: fresh")
 
-    if cfg["data"].get("velocity_target") == "current" and cfg["train"].get("freeze_backbone", False):
+    if (not full_covariance and cfg["data"].get("velocity_target") == "current" and cfg["train"].get("freeze_backbone", False)):
         for name, parameter in model.named_parameters():
             parameter.requires_grad = name.startswith("heads.dog.")
     return train.Trainer(

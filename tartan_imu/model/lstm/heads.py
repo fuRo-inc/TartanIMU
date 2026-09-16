@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 
 from tartan_imu.model.common.blocks import FcBlock
+from tartan_imu.model.common.velocity_covariance import inverse_softplus
 
 
 class OutputHead(nn.Module):
@@ -43,6 +44,19 @@ class OutputHead(nn.Module):
         self.output_block2 = FcBlock(
             self.lstm_size, self.output_dim, dropout=self.drop_ratio, cfg=cfg
         )
+        covariance_cfg = cfg.get("model", {}).get("velocity_covariance", {})
+        self.use_velocity_covariance = covariance_cfg.get("enabled", False)
+        if self.use_velocity_covariance:
+            if covariance_cfg.get("parameterization", "softplus_cholesky") != "softplus_cholesky":
+                raise ValueError("Only softplus_cholesky velocity covariance is supported")
+            if covariance_cfg.get("raw_dim", 6) != 6:
+                raise ValueError("Softplus-Cholesky velocity covariance requires raw_dim: 6")
+            # Kept separate from output_block2 so legacy 3-D covariance
+            # checkpoints and their state_dict keys remain unchanged.
+            self.velocity_covariance_head = FcBlock(
+                self.lstm_size, 6, dropout=self.drop_ratio, cfg=cfg
+            )
+            self._initialize_velocity_covariance_head(covariance_cfg)
         if self.split_z:
             self.output_block1 = FcBlock(
                 self.lstm_size, self.output_dim - 1, dropout=self.drop_ratio, cfg=cfg
@@ -58,6 +72,17 @@ class OutputHead(nn.Module):
         # Add learnable scale factor for velocity prediction
         self.velocity_scale = nn.Parameter(torch.ones(1, self.output_dim))
         self.use_velocity_scale = cfg.get("model", {}).get("pred_velocity", False)
+
+    def _initialize_velocity_covariance_head(self, covariance_cfg):
+        """Initialize Sigma approximately diag(initial_std**2), off-diagonal zero."""
+        eps = float(covariance_cfg.get("eps", 1.0e-4))
+        initial_std = float(covariance_cfg.get("initial_std", 0.1))
+        raw_diagonal_bias = inverse_softplus(initial_std - eps)
+        final_layer = self.velocity_covariance_head.fcs[-1]
+        nn.init.zeros_(final_layer.weight)
+        with torch.no_grad():
+            final_layer.bias.zero_()
+            final_layer.bias[:3].fill_(raw_diagonal_bias)
 
     def forward(self, out, batch_size, seq_len, predict_cov=False):
         """
@@ -83,7 +108,8 @@ class OutputHead(nn.Module):
             x1 = x1 * self.velocity_scale
 
         if predict_cov:
-            x2 = self.output_block2(out)
+            # Raw order: [Lxx_raw, Lyy_raw, Lzz_raw, Lyx, Lzx, Lzy].
+            x2 = (self.velocity_covariance_head if self.use_velocity_covariance else self.output_block2)(out)
             x2 = x2.view(batch_size, seq_len, -1)
             return x1, x2
         else:

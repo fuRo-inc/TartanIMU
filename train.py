@@ -213,6 +213,10 @@ class Trainer:
         """Perform inference on validation/test data."""
         self.model.eval()
         all_results = {"targets": [], "preds": [], "preds_cov": [], "losses": []}
+        full_covariance = bool(self.cfg.get("train", {}).get("covariance", {}).get("enabled", False)
+                               and self.cfg.get("model", {}).get("velocity_covariance", {}).get("enabled", False))
+        if full_covariance:
+            all_results.update({"covariance_nll": [], "nis": [], "predicted_std": [], "absolute_error": []})
 
         with torch.no_grad():
             for batch in data_loader:
@@ -229,6 +233,14 @@ class Trainer:
                 all_results["preds"].append(pred)
                 all_results["preds_cov"].append(pred_cov)
                 all_results["losses"].append(loss.unsqueeze(0))
+                if full_covariance:
+                    from tartan_imu.model.common.velocity_covariance import gaussian_velocity_nll
+                    nll, nis, L = gaussian_velocity_nll(pred, target, pred_cov, float(self.cfg["model"]["velocity_covariance"].get("eps", 1e-4)), True)
+                    sigma_diag = torch.diagonal(L @ L.transpose(-1, -2), dim1=-2, dim2=-1).sqrt()
+                    all_results["covariance_nll"].append(nll)
+                    all_results["nis"].append(nis)
+                    all_results["predicted_std"].append(sigma_diag)
+                    all_results["absolute_error"].append((target - pred).abs())
 
         # Concatenate results
         results = self._concatenate_results(all_results, len(data_loader.dataset))
@@ -264,6 +276,7 @@ class Trainer:
         total_data_time = 0.0
         total_compute_time = 0.0
         weight_sum = weight_count = 0
+        covariance_metric_sums, covariance_metric_count = {}, 0
         weight_min, weight_max = float("inf"), float("-inf")
         self.model.train()
         # Print trainable params once per training session.
@@ -291,6 +304,11 @@ class Trainer:
                 pred, pred_cov, targ, loss = function.fun_train_forward_efficient(
                     self.cfg, self.model, batch, self.start_cov_epochs, epoch
                 )
+            covariance_metrics = function.get_last_covariance_metrics()
+            if covariance_metrics:
+                for key, value in covariance_metrics.items():
+                    covariance_metric_sums[key] = covariance_metric_sums.get(key, 0.0) + value
+                covariance_metric_count += 1
             self.scaler.scale(loss).backward()
             self.scaler.step(self.optimizer)
             self.scaler.update()
@@ -345,6 +363,12 @@ class Trainer:
                 "Epoch speed weights: mean=%.6f min=%.6f max=%.6f",
                 result["mean_speed_weight"], result["min_speed_weight"], result["max_speed_weight"],
             )
+        if covariance_metric_count:
+            result.update({key: value / covariance_metric_count for key, value in covariance_metric_sums.items()})
+            logger.info("covariance: velocity_loss=%.6f nll=%.6f total=%.6f std=[%.5f, %.5f, %.5f] diag=[%.5f, %.5f, %.5f] min/max Ldiag=[%.5f, %.5f] |cov|=[%.5f, %.5f, %.5f]",
+                        result["velocity_loss"], result["covariance_nll"], result["total_loss"],
+                        result["std_x"], result["std_y"], result["std_z"], result["cov_xx"], result["cov_yy"], result["cov_zz"],
+                        result["min_cholesky_diagonal"], result["max_cholesky_diagonal"], result["abs_cov_xy"], result["abs_cov_xz"], result["abs_cov_yz"])
         return result
 
     def train(self, train_loader, val_loader=None, test_loader=None):
@@ -407,6 +431,9 @@ class Trainer:
                 write_wandb(
                     "lr", self.optimizer.param_groups[0]["lr"], epoch, self.local_rank
                 )
+                for key in ("velocity_loss", "covariance_nll", "total_loss", "std_x", "std_y", "std_z", "cov_xx", "cov_yy", "cov_zz", "min_cholesky_diagonal", "max_cholesky_diagonal", "abs_cov_xy", "abs_cov_xz", "abs_cov_yz"):
+                    if key in train_attr_dict:
+                        write_wandb(f"covariance/{key}", train_attr_dict[key], epoch, self.local_rank)
 
             epoch_train_loss.append(train_loss)  # The loss for each epoch is the mean of all batch losses
             epoch_train_mse.append(train_mse_val)
@@ -426,6 +453,8 @@ class Trainer:
                 validation_mse = np.mean(
                     (val_attr_dict["targets"] - val_attr_dict["preds"]) ** 2
                 )
+                if "covariance_nll" in val_attr_dict:
+                    logger.info("validation covariance: nll=%.6f NIS=%.6f predicted_std=%s absolute_error=%s", np.mean(val_attr_dict["covariance_nll"]), np.mean(val_attr_dict["nis"]), np.mean(val_attr_dict["predicted_std"], axis=0), np.mean(val_attr_dict["absolute_error"], axis=0))
                 validation_time = end_t - start_t
 
                 if self.log:
