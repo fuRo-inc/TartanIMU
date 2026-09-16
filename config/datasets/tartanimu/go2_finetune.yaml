@@ -10,7 +10,7 @@ data:
   data_path:
     car: null
     drone: null
-    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500/tartan_imu
+    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_39700/tartan_imu
     human: null
 
   use_local_coord: True
@@ -57,9 +57,9 @@ model:
   adapter: False
 
 train:
-  experiment_name: go2_tartanimu_finetune_v3
+  experiment_name: go2_tartanimu_finetune_v4
 
-  out_dir: ./exp_result/go2_tartanimu_finetune_v3
+  out_dir: ./exp_result/go2_tartanimu_finetune_v4
 
   use_pretrain_model: False
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
@@ -112,11 +112,11 @@ val:
   n_workers: 2
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v3
+  out_dir: ./exp_result/go2_tartanimu_finetune_v4
   n_workers: 2
 
 schemes:
   train: True
   online_adaption: False
-  offline_finetune: True
+  offline_finetune: False
   test: False
