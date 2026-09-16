@@ -10,7 +10,7 @@ data:
   data_path:
     car: null
     drone: null
-    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_39700/tartan_imu
+    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500/tartan_imu
     human: null
 
   use_local_coord: True
