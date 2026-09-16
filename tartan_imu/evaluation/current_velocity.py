@@ -14,7 +14,8 @@ from tartan_imu.dataloader import dataset_AirLab as dataset_utils
 MOTION_TYPE_ID = {"car": 1, "dog": 2, "drone": 3, "human": 4}
 
 
-def infer_current_velocity(model, config, npz_path, motion_type, device, batch_size=None):
+def infer_current_velocity(model, config, npz_path, motion_type, device, batch_size=None,
+                           return_endpoint_indices=False):
     """Return predicted and GT body-frame endpoint velocities for one NPZ.
 
     This intentionally creates a dataset per trajectory while reusing the
@@ -37,5 +38,15 @@ def infer_current_velocity(model, config, npz_path, motion_type, device, batch_s
             prediction = model(imu, motion_type=label, predict_cov=False, compute_all_heads=False)[motion_type]
             predictions.append(prediction[:, -1, :].cpu().numpy())
     if not predictions:
-        return np.empty((0, 3), dtype=np.float32), np.empty((0, 3), dtype=np.float32)
-    return np.concatenate(predictions), np.concatenate(targets)
+        empty = np.empty((0, 3), dtype=np.float32)
+        return (empty, empty, np.empty((0,), dtype=np.int64)) if return_endpoint_indices else (empty, empty)
+    pred, target = np.concatenate(predictions), np.concatenate(targets)
+    if not return_endpoint_indices:
+        return pred, target
+    # Test-mode datasets are not shuffled.  This is the prepared-file sample
+    # endpoint used by the dataloader, not a collector/raw dataset index.
+    endpoints = np.asarray([
+        frame_id + basic.seq_len * basic.window_size - 1
+        for _seq_id, frame_id, _label in basic.get_merged_index_map()
+    ], dtype=np.int64)
+    return pred, target, endpoints

@@ -82,6 +82,16 @@ train:
   predict_end: 10
   add_noise: True
 
+  # GT-vector-speed weighting for the causal current body-frame target only.
+  # This does not remove fallen data; filter such windows separately if needed.
+  velocity_loss:
+    speed_weighting:
+      enabled: true
+      alpha: 2.0
+      v_ref: 0.25
+      power: 2.0
+      normalize_mean: true
+
   # Go2なのでdog headのみ
   active_heads:
     - dog

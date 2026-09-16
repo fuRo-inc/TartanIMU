@@ -19,6 +19,13 @@ from tartan_imu.model.common.losses import (
 )
 
 
+def _current_velocity_loss_config(cfg):
+    """Enable speed weighting only for causal endpoint velocity targets."""
+    if cfg.get("data", {}).get("velocity_target", "window_mean") != "current":
+        return None
+    return cfg.get("train", {}).get("velocity_loss", {}).get("speed_weighting")
+
+
 def fun_train_forward(cfg, model, batch, start_cov_epochs, epoch):
     """
     Training forward pass with proper motion type handling.
@@ -80,6 +87,7 @@ def fun_train_forward(cfg, model, batch, start_cov_epochs, epoch):
         multi_head_mask,
         start_cov_epochs,
         cfg["data"]["use_local_coord"],
+        _current_velocity_loss_config(cfg),
     )
 
     last_key = None
@@ -172,6 +180,7 @@ def fun_train_forward_efficient(cfg, model, batch, start_cov_epochs, epoch):
         multi_head_mask,
         start_cov_epochs,
         cfg["data"]["use_local_coord"],
+        _current_velocity_loss_config(cfg),
     )
 
     last_key = None
@@ -300,6 +309,13 @@ def fun_test_forward(cfg, model, batch, start_cov_epochs, epoch, past_kv=None, t
         # from tartan_imu.model.common.losses import smooth_velocity_predictions
         # pred = smooth_velocity_predictions(pred, window_size=3)
 
-    loss = get_sequence_smooth_loss(pred, pred_cov, targ, epoch, start_cov_epochs)
+    loss = get_sequence_smooth_loss(
+        pred,
+        pred_cov,
+        targ,
+        epoch,
+        start_cov_epochs,
+        velocity_loss_config=_current_velocity_loss_config(cfg),
+    )
 
     return pred, pred_cov, targ, orien, loss, present_kv

@@ -8,11 +8,40 @@ The training loss path is ``single_head_velocity_loss`` (L1, weight=20). Helpers
 here cover the multi-head masked-loss reduction and the sequence loss used
 during evaluation.
 """
-from typing import Callable
+from typing import Callable, Mapping, Optional
 
 import torch
 
 EPSILON = 1e-7
+
+
+def speed_dependent_velocity_weight(
+    targ: torch.Tensor, speed_weighting: Optional[Mapping] = None
+) -> torch.Tensor:
+    """Return one bounded, GT-only weight per velocity vector.
+
+    The returned shape is ``targ.shape[:-1] + (1,)`` so a single weight is
+    broadcast across vx/vy/vz.  This intentionally does not filter samples:
+    low-speed fallen/stationary data can also be upweighted, so any future
+    upright/fallen filtering must remain a separate dataset-level policy.
+    """
+    cfg = speed_weighting or {}
+    if not cfg.get("enabled", False):
+        return torch.ones_like(targ[..., :1])
+
+    alpha = float(cfg.get("alpha", 2.0))
+    v_ref = float(cfg.get("v_ref", 0.25))
+    power = float(cfg.get("power", 2.0))
+    if alpha < 0 or v_ref <= 0 or power <= 0:
+        raise ValueError("speed_weighting requires alpha >= 0, v_ref > 0, power > 0")
+
+    # Targets do not require gradients in normal training; detach makes the
+    # GT-only contract explicit and also protects callers that pass one that does.
+    speed = torch.linalg.vector_norm(targ.detach(), dim=-1, keepdim=True)
+    raw = 1.0 + alpha / (1.0 + (speed / v_ref).pow(power))
+    if cfg.get("normalize_mean", True):
+        raw = raw / raw.mean().clamp_min(EPSILON)
+    return raw
 
 
 def loss_distribution_diag(
@@ -47,6 +76,7 @@ def get_sequence_smooth_loss(
     targ: torch.Tensor,
     epoch: int,
     start_cov_epoch: int,
+    velocity_loss_config: Optional[Mapping] = None,
 ) -> torch.Tensor:
     """
     Sequence loss for evaluation.
@@ -57,7 +87,9 @@ def get_sequence_smooth_loss(
     - After start_cov_epoch: bounded covariance loss (diagonal Gaussian NLL style).
     """
     if epoch <= start_cov_epoch:
-        loss = single_head_velocity_loss(pred, pred_cov, targ)["loss"]
+        loss = single_head_velocity_loss(
+            pred, pred_cov, targ, velocity_loss_config=velocity_loss_config
+        )["loss"]
     else:
         loss = loss_distribution_diag(pred, pred_cov, targ)
     return torch.mean(loss)
@@ -71,6 +103,7 @@ def multi_head_smooth_loss(
     multi_head_mask: dict,
     start_cov_epoch: int,
     use_local_coord: bool,
+    velocity_loss_config: Optional[Mapping] = None,
 ) -> torch.Tensor:
     """Sum the per-head masked smooth loss across all motion-type heads."""
     multi_head_loss = {}
@@ -84,6 +117,7 @@ def multi_head_smooth_loss(
             multi_head_mask[key],
             start_cov_epoch,
             use_local_coord,
+            velocity_loss_config,
         )
         total_loss = multi_head_loss[key] + total_loss
     return total_loss
@@ -97,6 +131,7 @@ def efficient_multi_head_smooth_loss(
     multi_head_mask: dict,
     start_cov_epochs: int,
     use_local_coord: bool,
+    velocity_loss_config: Optional[Mapping] = None,
 ) -> torch.Tensor:
     """Efficient multi-head smooth loss without hot-path debug I/O."""
     total_loss = 0
@@ -114,6 +149,7 @@ def efficient_multi_head_smooth_loss(
                     mask,
                     start_cov_epochs,
                     use_local_coord,
+                    velocity_loss_config,
                 )
 
                 total_loss += head_loss
@@ -166,6 +202,7 @@ def single_head_mask_loss(
     mask: torch.Tensor,
     start_cov_epoch: int,
     use_local_coord: bool = False,
+    velocity_loss_config: Optional[Mapping] = None,
 ) -> torch.Tensor:
     """
     Simplified masked loss per head:
@@ -177,8 +214,10 @@ def single_head_mask_loss(
     cov_weight = smooth_transition_weight(epoch, start_cov_epoch, transition_epochs=5)
 
     if use_local_coord:
-        # Keep velocity loss path for local coord (not used in current cfg)
-        loss_covariance = single_head_velocity_loss(pred, pred_cov, targ)
+        # Local-coordinate velocity path (used by Go2 current-velocity training).
+        loss_covariance = single_head_velocity_loss(
+            pred, pred_cov, targ, velocity_loss_config=velocity_loss_config
+        )
         loss = loss_covariance["loss"]
         # Mask to this head's samples, then normalize by the head's OWN active
         # element count (not the whole batch) so the per-head loss is
@@ -267,7 +306,10 @@ def diag_ln_cov_loss(
 
 
 def single_head_velocity_loss(
-    pred: torch.Tensor, pred_cov: torch.Tensor, targ: torch.Tensor
+    pred: torch.Tensor,
+    pred_cov: torch.Tensor,
+    targ: torch.Tensor,
+    velocity_loss_config: Optional[Mapping] = None,
 ) -> dict:
     """Primary velocity loss: weighted L1.
 
@@ -300,8 +342,9 @@ def single_head_velocity_loss(
             vel_loss += confs["cov_weight"] * diag_ln_cov_loss(vel_dist, cov)
         else:
             vel_loss += confs["cov_weight"] * diag_ln_cov_loss(vel_dist.detach(), cov)
-    loss += confs["weight"] * vel_loss
-    return {"loss": loss, "cov_loss": cov_loss}
+    speed_weight = speed_dependent_velocity_weight(targ, velocity_loss_config)
+    loss += confs["weight"] * vel_loss * speed_weight
+    return {"loss": loss, "cov_loss": cov_loss, "speed_weight": speed_weight}
 
 
 loss_fc_list = {

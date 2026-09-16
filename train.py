@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import wandb
 from tartan_imu.model.common import function
+from tartan_imu.model.common.losses import speed_dependent_velocity_weight
 
 from tools import distributed_eval
 
@@ -93,6 +94,11 @@ class Trainer:
         self.epochs = cfg["train"]["epochs"]
         self.start_cov_epochs = cfg["train"]["start_cov_epochs"]
         self.out_dir = cfg["train"]["out_dir"]
+        self.speed_weighting_cfg = (
+            cfg.get("train", {}).get("velocity_loss", {}).get("speed_weighting", {})
+            if cfg.get("data", {}).get("velocity_target") == "current"
+            else {}
+        )
 
         # Debug output directory
         logging.info(f"Trainer initialization - Output directory: {self.out_dir}")
@@ -132,6 +138,14 @@ class Trainer:
         # Logging setup
         self.log = args.log
         logger.info(f"Trainer initialized on device: {self.device}")
+        if self.speed_weighting_cfg.get("enabled", False):
+            logger.info(
+                "Current-velocity speed weighting enabled: alpha=%s v_ref=%s power=%s normalize_mean=%s",
+                self.speed_weighting_cfg.get("alpha", 2.0),
+                self.speed_weighting_cfg.get("v_ref", 0.25),
+                self.speed_weighting_cfg.get("power", 2.0),
+                self.speed_weighting_cfg.get("normalize_mean", True),
+            )
 
     @staticmethod
     def _safe_cuda_sync():
@@ -249,6 +263,8 @@ class Trainer:
         total_steps = 0
         total_data_time = 0.0
         total_compute_time = 0.0
+        weight_sum = weight_count = 0
+        weight_min, weight_max = float("inf"), float("-inf")
         self.model.train()
         # Print trainable params once per training session.
         if not hasattr(self, "_params_printed"):
@@ -290,6 +306,13 @@ class Trainer:
             inferback_time = back_end - data_end  # training and backward time
             batch_loss = float(loss.detach().item())
             batch_mse = float(torch.mean((targ.detach() - pred.detach()) ** 2).item())
+            if self.speed_weighting_cfg.get("enabled", False):
+                with torch.no_grad():
+                    weights = speed_dependent_velocity_weight(targ, self.speed_weighting_cfg)
+                    weight_sum += float(weights.sum().item())
+                    weight_count += weights.numel()
+                    weight_min = min(weight_min, float(weights.min().item()))
+                    weight_max = max(weight_max, float(weights.max().item()))
             total_loss += batch_loss
             total_mse += batch_mse
             total_steps += 1
@@ -305,13 +328,24 @@ class Trainer:
                 "avg_data_time": float("inf"),
                 "avg_compute_time": float("inf"),
             }
-        return {
+        result = {
             "avg_loss": total_loss / total_steps,
             "avg_mse": total_mse / total_steps,
             "num_steps": total_steps,
             "avg_data_time": total_data_time / total_steps,
             "avg_compute_time": total_compute_time / total_steps,
         }
+        if weight_count:
+            result.update(
+                mean_speed_weight=weight_sum / weight_count,
+                min_speed_weight=weight_min,
+                max_speed_weight=weight_max,
+            )
+            logger.info(
+                "Epoch speed weights: mean=%.6f min=%.6f max=%.6f",
+                result["mean_speed_weight"], result["min_speed_weight"], result["max_speed_weight"],
+            )
+        return result
 
     def train(self, train_loader, val_loader=None, test_loader=None):
         """Run the standard training loop over all epochs with optional val/test."""
