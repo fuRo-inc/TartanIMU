@@ -209,6 +209,19 @@ class Trainer:
             eps=1e-6,
         )
 
+    def _get_active_learning_rate(self):
+        """Return LR of the parameter group that actually has trainable parameters."""
+        active_lrs = []
+
+        for group in self.optimizer.param_groups:
+            if any(p.requires_grad for p in group["params"]):
+                active_lrs.append(group["lr"])
+
+        if not active_lrs:
+            return self.optimizer.param_groups[0]["lr"]
+
+        return max(active_lrs)
+
     def inference_step(self, data_loader, epoch):
         """Perform inference on validation/test data."""
         self.model.eval()
@@ -282,7 +295,18 @@ class Trainer:
         # Print trainable params once per training session.
         if not hasattr(self, "_params_printed"):
             ModelFactory.print_trainable_parameters(self.model)
+            for i, group in enumerate(self.optimizer.param_groups):
+                num_params = sum(p.numel() for p in group["params"])
+                num_trainable = sum(p.numel() for p in group["params"] if p.requires_grad)
+                logging.info(
+                    "Optimizer group %d: lr=%.8f params=%d trainable=%d",
+                    i,
+                    group["lr"],
+                    num_params,
+                    num_trainable,
+                )
             self._params_printed = True
+
         data_start = time.time()
         iteration = 0
         if current_frame is not None:
@@ -424,13 +448,9 @@ class Trainer:
             if self.log:
                 write_wandb("train", train_loss, epoch, self.local_rank)
                 write_wandb("run_time", epoch_time, epoch, self.local_rank)
-                write_wandb(
-                    "instance_per_second", instance_per_second, epoch, self.local_rank
-                )
+                write_wandb("instance_per_second", instance_per_second, epoch, self.local_rank)
                 write_wandb("train_mse_val", train_mse_val, epoch, self.local_rank)
-                write_wandb(
-                    "lr", self.optimizer.param_groups[0]["lr"], epoch, self.local_rank
-                )
+                write_wandb("lr", self._get_active_learning_rate(), epoch, self.local_rank)
                 for key in ("velocity_loss", "covariance_nll", "total_loss", "std_x", "std_y", "std_z", "cov_xx", "cov_yy", "cov_zz", "min_cholesky_diagonal", "max_cholesky_diagonal", "abs_cov_xy", "abs_cov_xz", "abs_cov_yz"):
                     if key in train_attr_dict:
                         write_wandb(f"covariance/{key}", train_attr_dict[key], epoch, self.local_rank)
@@ -450,9 +470,7 @@ class Trainer:
                 end_t = time.time()
 
                 validation_loss = np.average(val_attr_dict["losses"])
-                validation_mse = np.mean(
-                    (val_attr_dict["targets"] - val_attr_dict["preds"]) ** 2
-                )
+                validation_mse = np.mean((val_attr_dict["targets"] - val_attr_dict["preds"]) ** 2)
                 if "covariance_nll" in val_attr_dict:
                     logger.info("validation covariance: nll=%.6f NIS=%.6f predicted_std=%s absolute_error=%s", np.mean(val_attr_dict["covariance_nll"]), np.mean(val_attr_dict["nis"]), np.mean(val_attr_dict["predicted_std"], axis=0), np.mean(val_attr_dict["absolute_error"], axis=0))
                 validation_time = end_t - start_t
@@ -480,9 +498,7 @@ class Trainer:
                 getattr(self.scheduler, "step", None)
             ):
                 self.scheduler.step(scheduler_metric)
-            logging.info(
-                "LR scheduler stepped with metric %.6f", scheduler_metric
-            )
+            logging.info("LR scheduler stepped with metric %.6f", scheduler_metric)
 
             # Run test set if available
             test_loss_val = None
@@ -494,9 +510,7 @@ class Trainer:
                 test_attr_dict = self.inference_step(test_loader, epoch)
                 end_t = time.time()
                 test_loss_val = np.average(test_attr_dict["losses"])
-                test_mse_val = np.mean(
-                    (test_attr_dict["targets"] - test_attr_dict["preds"]) ** 2
-                )
+                test_mse_val = np.mean((test_attr_dict["targets"] - test_attr_dict["preds"]) ** 2)
                 test_time = end_t - start_t
 
                 if self.log:
@@ -513,22 +527,22 @@ class Trainer:
                     train_loss=train_loss,
                     val_loss=validation_loss if validation_loss is not None else None,
                     test_loss=test_loss_val,
-                    lr=self.optimizer.param_groups[0]["lr"],
+                    lr=self._get_active_learning_rate(),
                     epoch_time=epoch_time,
                 )
 
-            if self.optimizer.param_groups[0]["lr"] < self.min_lr_stop:
+            active_lr = self._get_active_learning_rate()
+            if active_lr < self.min_lr_stop:
                 logging.info(
-                    "Stopping early due to min_lr_stop threshold (lr=%s threshold=%s)",
-                    self.optimizer.param_groups[0]["lr"],
+                    "Stopping early due to min_lr_stop threshold "
+                    "(active_lr=%s threshold=%s)",
+                    active_lr,
                     self.min_lr_stop,
                 )
                 break
 
             # Unified checkpoint saving strategy
-            self.save_checkpoint_strategy(
-                epoch, current_train_loss, validation_loss, test_loss_val
-            )
+            self.save_checkpoint_strategy(epoch, current_train_loss, validation_loss, test_loss_val)
 
         # Only finish wandb from rank 0
         if self.local_rank == 0 and wandb.run is not None:

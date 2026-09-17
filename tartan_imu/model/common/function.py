@@ -81,10 +81,17 @@ def _full_covariance_loss(cfg, predictions, raw_covariances, target, masks):
     _LAST_COVARIANCE_METRICS = {
         "velocity_loss": float(total_velocity.detach()), "covariance_nll": float(total_nll.detach()),
         "total_loss": float((total_velocity + weight * total_nll).detach()), "nis": float(total_nis.detach()),
-        "std_x": float(std[0]), "std_y": float(std[1]), "std_z": float(std[2]),
-        "cov_xx": float(std[0].square()), "cov_yy": float(std[1].square()), "cov_zz": float(std[2].square()),
-        "abs_cov_xy": float(offdiag[0]), "abs_cov_xz": float(offdiag[1]), "abs_cov_yz": float(offdiag[2]),
-        "min_cholesky_diagonal": float(chol.min()), "max_cholesky_diagonal": float(chol.max()),
+        "std_x": std[0].detach().item(),
+        "std_y": std[1].detach().item(),
+        "std_z": std[2].detach().item(),
+        "cov_xx": std[0].square().detach().item(),
+        "cov_yy": std[1].square().detach().item(),
+        "cov_zz": std[2].square().detach().item(),
+        "abs_cov_xy": offdiag[0].detach().item(),
+        "abs_cov_xz": offdiag[1].detach().item(),
+        "abs_cov_yz": offdiag[2].detach().item(),
+        "min_cholesky_diagonal": chol.min().detach().item(),
+        "max_cholesky_diagonal": chol.max().detach().item(),
     }
     return total_velocity + weight * total_nll
 

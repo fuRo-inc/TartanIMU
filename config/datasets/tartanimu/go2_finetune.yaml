@@ -10,7 +10,7 @@ data:
   data_path:
     car: null
     drone: null
-    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_39700/tartan_imu
+    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500/tartan_imu
     human: null
 
   use_local_coord: True
@@ -54,23 +54,23 @@ model:
   model_name: Foundation_Model
   model_yaml: "./config/resnet_lstm_multihead.yaml"
   pred_velocity: True
-  adapter: False
+  adapter: True
 
 train:
-  experiment_name: go2_tartanimu_finetune_v4
+  experiment_name: go2_tartanimu_finetune_v10
 
-  out_dir: ./exp_result/go2_tartanimu_finetune_v4
+  out_dir: ./exp_result/go2_tartanimu_finetune_v10
 
   use_pretrain_model: False
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
   pretrained_source: expert_dog.pt
   dog_head_init: pretrained  # set reinitialize to compare a fresh velocity head
-  freeze_backbone: False      # Phase 1; set false for Phase 2
+  freeze_backbone: True      # Phase 1; set false for Phase 2
   use_multi_gpu: False
   use_amp: True
 
   batch_size: 512
-  epochs: 30
+  epochs: 100
 
   # 今回はcovarianceを目的にしない
   start_cov_epochs: 9999
@@ -112,11 +112,11 @@ val:
   n_workers: 2
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v4
+  out_dir: ./exp_result/go2_tartanimu_finetune_v10
   n_workers: 2
 
 schemes:
   train: True
   online_adaption: False
-  offline_finetune: False
+  offline_finetune: True
   test: False

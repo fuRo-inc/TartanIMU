@@ -48,15 +48,16 @@ def gaussian_velocity_nll(
     eps: float = 1.0e-4,
     detach_velocity: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Multivariate Gaussian NLL (without constant) in the body frame.
-
-    Returns per-vector ``(nll, nis, L)``.  It deliberately uses triangular
-    solving, never a covariance inverse.
-    """
-    error = target_body_velocity - predicted_velocity
+    """Multivariate Gaussian NLL (without constant) in the body frame."""
+    # Covariance linear algebra is evaluated in FP32.
+    # torch.linalg.solve_triangular on CUDA does not support FP16.
+    predicted_velocity_fp32 = predicted_velocity.float()
+    target_body_velocity_fp32 = target_body_velocity.float()
+    raw_cov_fp32 = raw_cov.float()
+    error = target_body_velocity_fp32 - predicted_velocity_fp32
     if detach_velocity:
         error = error.detach()
-    L = build_velocity_cholesky(raw_cov, eps)
+    L = build_velocity_cholesky(raw_cov_fp32, eps)
     y = torch.linalg.solve_triangular(L, error.unsqueeze(-1), upper=False)
     mahalanobis = y.squeeze(-1).square().sum(dim=-1)
     diagonal = torch.diagonal(L, dim1=-2, dim2=-1)
