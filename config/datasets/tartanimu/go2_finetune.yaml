@@ -57,15 +57,15 @@ model:
   adapter: True
 
 train:
-  experiment_name: go2_tartanimu_finetune_v10
+  experiment_name: go2_tartanimu_finetune_v17
 
-  out_dir: ./exp_result/go2_tartanimu_finetune_v10
+  out_dir: ./exp_result/go2_tartanimu_finetune_v17
 
-  use_pretrain_model: False
+  use_pretrain_model: True
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
-  pretrained_source: expert_dog.pt
+  pretrained_source: unified_weights_only.pt
   dog_head_init: pretrained  # set reinitialize to compare a fresh velocity head
-  freeze_backbone: True      # Phase 1; set false for Phase 2
+  freeze_backbone: False      # Phase 1; set false for Phase 2
   use_multi_gpu: False
   use_amp: True
 
@@ -102,6 +102,8 @@ train:
     head_learning_rate: 0.0001
     method: Adam
     weight_decay: 0.01
+    backbone_weight_decay: 0.01
+    head_weight_decay: 0.0
 
   scheduler:
     factor: 0.1
@@ -112,11 +114,11 @@ val:
   n_workers: 2
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v10
+  out_dir: ./exp_result/go2_tartanimu_finetune_v17
   n_workers: 2
 
 schemes:
   train: True
   online_adaption: False
-  offline_finetune: True
+  offline_finetune: False
   test: False

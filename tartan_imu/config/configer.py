@@ -239,11 +239,16 @@ def build_trainer(args, cfg, model, pretrained_path=None, resume_path=None, **kw
         dog_velocity_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.") and ".velocity_covariance_head." not in n]
         dog_covariance_head = [p for n, p in model.named_parameters() if n.startswith("heads.dog.velocity_covariance_head.")]
         groups = [
-            {"params": [p for p in backbone if p.requires_grad], "lr": opt_cfg.get("backbone_learning_rate", opt_cfg["learning_rate"])},
-            {"params": [p for p in dog_velocity_head if p.requires_grad], "lr": opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"])},
+            {"params": [p for p in backbone if p.requires_grad],
+             "lr": opt_cfg.get("backbone_learning_rate", opt_cfg["learning_rate"]),
+             "weight_decay": opt_cfg.get("backbone_weight_decay", opt_cfg["weight_decay"])},
+            {"params": [p for p in dog_velocity_head if p.requires_grad],
+             "lr": opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"]),
+             "weight_decay": opt_cfg.get("head_weight_decay", opt_cfg["weight_decay"])},
         ]
         if full_covariance:
-            groups.append({"params": [p for p in dog_covariance_head if p.requires_grad], "lr": covariance_train_cfg.get("head_learning_rate", opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"]))})
+            groups.append({"params": [p for p in dog_covariance_head if p.requires_grad],
+                           "lr": covariance_train_cfg.get("head_learning_rate", opt_cfg.get("head_learning_rate", opt_cfg["learning_rate"]))})
         optimizer = optim(groups, weight_decay=opt_cfg["weight_decay"])
     else:
         optimizer = optim(model.parameters(), opt_cfg["learning_rate"], weight_decay=opt_cfg["weight_decay"])

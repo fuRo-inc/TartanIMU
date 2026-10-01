@@ -714,6 +714,10 @@ def compute_plot_dict(cfg, net_attr_dict, traj_attr_dict):
     ts = traj_attr_dict["ts"]  # 6015
     pos_pred = traj_attr_dict["pos_pred"]  # 6015*3 (already aligned)
     pos_gt = traj_attr_dict["pos_gt"]
+    # Available for velocity_target=current.
+    # GT body-frame velocity is rotated by GT orientation and integrated
+    # using exactly the same integration method as pos_pred.
+    pos_oracle = traj_attr_dict.get("pos_oracle")
     sample_freq = cfg["data"]["sample_freq"]
     window_time = cfg["model_param"]["window_time"]
     pred_velocity = cfg.get("model", {}).get("pred_velocity", False)
@@ -739,8 +743,9 @@ def compute_plot_dict(cfg, net_attr_dict, traj_attr_dict):
     pred_sigmas = np.exp(preds_cov)  # (1204, 3)
     plot_dict = {
         "ts": ts,
-        "pos_pred": pos_pred,  # Already aligned in pose_integrate
+        "pos_pred": pos_pred,
         "pos_gt": pos_gt,
+        "pos_oracle": pos_oracle,
         "pred_ts": pred_ts,
         "preds": preds,
         "targets": net_attr_dict["targets"],
@@ -780,10 +785,13 @@ def rotate_ax(step, ax):
 def make_3d_trj_plots(plot_dict, outdir):
     pos_pred = plot_dict["pos_pred"]  # 6015*3
     pos_gt = plot_dict["pos_gt"]  # 6015*3
+    pos_oracle = plot_dict.get("pos_oracle")
     mpl.rcParams["legend.fontsize"] = 10
     fig = plt.figure()
     ax = fig.add_subplot(projection="3d")
     ax.plot(pos_pred[:, 0], pos_pred[:, 1], pos_pred[:, 2], label="network_pred")
+    if pos_oracle is not None:
+        ax.plot(pos_oracle[:, 0], pos_oracle[:, 1], pos_oracle[:, 2], label="GT Velocity Integrated (Oracle)")
     ax.plot(pos_gt[:, 0], pos_gt[:, 1], pos_gt[:, 2], label="Ground_truth")
     plt.legend(["network_pred", "Ground_truth"])
     if outdir is not None:
@@ -802,6 +810,24 @@ def make_plots(
     plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
     pos_pred = plot_dict["pos_pred"]  # 6015*3
     pos_gt = plot_dict["pos_gt"]  # 6015*3
+    pos_oracle = plot_dict.get("pos_oracle")
+
+    oracle_error = np.linalg.norm(pos_oracle - pos_gt, axis=1)
+    pred_error = np.linalg.norm(pos_pred - pos_gt, axis=1)
+
+    print(
+        f"[DEBUG] Oracle vs GT: "
+        f"mean={oracle_error.mean():.6f} m, "
+        f"final={oracle_error[-1]:.6f} m, "
+        f"max={oracle_error.max():.6f} m"
+    )
+
+    print(
+        f"[DEBUG] Prediction vs GT: "
+        f"mean={pred_error.mean():.6f} m, "
+        f"final={pred_error[-1]:.6f} m, "
+        f"max={pred_error.max():.6f} m"
+    )
 
     # Calculate trajectory length
     traj_length = np.sum(np.linalg.norm(np.diff(pos_gt, axis=0), axis=1))
@@ -828,6 +854,8 @@ def make_plots(
     # --- 1. Trajectory Plot (Top Left) ---
     plt.subplot2grid((3, 4), (0, 0), rowspan=2, colspan=2)
     plt.plot(pos_gt[:, 0], pos_gt[:, 1], 'r-', linewidth=1.5, label="Ground Truth", alpha=0.8)
+    if pos_oracle is not None:
+        plt.plot(pos_oracle[:, 0], pos_oracle[:, 1], 'g-.', linewidth=1.5, label="GT Velocity Integrated (Oracle)", alpha=0.9,)
     plt.plot(pos_pred[:, 0], pos_pred[:, 1], 'b--', linewidth=1.5, label="Network Prediction")
     plt.axis("equal")
     plt.grid(True, linestyle=':', alpha=0.6)

@@ -11,7 +11,7 @@ data:
   data_path:
     car: null
     drone: null
-    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500/tartan_imu
+    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500_2/tartan_imu
     human: null
 
   use_local_coord: True
@@ -69,13 +69,13 @@ model:
 
 
 train:
-  experiment_name: go2_tartanimu_finetune_v10_covariance
-  out_dir: ./exp_result/go2_tartanimu_finetune_v10_covariance
+  experiment_name: go2_tartanimu_finetune_v11_covariance
+  out_dir: ./exp_result/go2_tartanimu_finetune_v11_covariance
 
   use_pretrain_model: False
 
-  # 実際の重みは --checkpoint でv10を指定する
-  pretrained_source: go2_tartanimu_finetune_v10
+  # 実際の重みは --checkpoint でv11を指定する
+  pretrained_source: go2_tartanimu_finetune_v11
 
   dog_head_init: pretrained
 
@@ -118,7 +118,7 @@ train:
     # まずは通常のGaussian NLLとして学習
     apply_speed_weighting: false
 
-    # v10のネットワークを固定
+    # v11のネットワークを固定
     freeze_backbone: true
     freeze_velocity_head: true
 
@@ -146,7 +146,7 @@ val:
 
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v10_covariance
+  out_dir: ./exp_result/go2_tartanimu_finetune_v11_covariance
   n_workers: 2
 
 

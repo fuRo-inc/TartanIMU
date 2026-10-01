@@ -409,11 +409,23 @@ def main(rank: int, world_size: int, args, resume_path, model_path, cfg):
         create_output_dir(output_dir)
         # Copy configuration files safely
         try:
-            shutil.copy2(args.yaml, os.path.join(output_dir, "default.yaml"))
-            shutil.copy2(
-                cfg["model"]["model_yaml"], os.path.join(output_dir, "model.yaml")
-            )
-            logging.info(f"Configuration files copied to {output_dir}")
+            config_src = os.path.abspath(args.yaml)
+            config_dst = os.path.abspath(os.path.join(output_dir, "default.yaml"))
+
+            if config_src != config_dst:
+                shutil.copy2(config_src, config_dst)
+            else:
+                logging.info("Config already exists at output path; skipping copy: %s", config_dst)
+
+            model_src = os.path.abspath(cfg["model"]["model_yaml"])
+            model_dst = os.path.abspath(os.path.join(output_dir, "model.yaml"))
+
+            if model_src != model_dst:
+                shutil.copy2(model_src, model_dst)
+                logging.info(f"Configuration files copied to {output_dir}")
+            else:
+                logging.info("Model config already exists at output path; skipping copy: %s", model_dst)
+
         except FileNotFoundError as e:
             logging.error(f"Configuration file not found: {e}")
             raise
