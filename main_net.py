@@ -414,6 +414,7 @@ def main(rank: int, world_size: int, args, resume_path, model_path, cfg):
 
             if config_src != config_dst:
                 shutil.copy2(config_src, config_dst)
+                logging.info(f"Configuration files copied to {output_dir}")
             else:
                 logging.info("Config already exists at output path; skipping copy: %s", config_dst)
 
@@ -422,7 +423,7 @@ def main(rank: int, world_size: int, args, resume_path, model_path, cfg):
 
             if model_src != model_dst:
                 shutil.copy2(model_src, model_dst)
-                logging.info(f"Configuration files copied to {output_dir}")
+                logging.info(f"Model config copied to {output_dir}")
             else:
                 logging.info("Model config already exists at output path; skipping copy: %s", model_dst)
 

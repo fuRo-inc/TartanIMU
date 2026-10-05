@@ -65,7 +65,7 @@ train:
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
   pretrained_source: unified_weights_only.pt
   dog_head_init: pretrained  # set reinitialize to compare a fresh velocity head
-  freeze_backbone: False      # Phase 1; set false for Phase 2
+  freeze_backbone: True      # Phase 1; set false for Phase 2
   use_multi_gpu: False
   use_amp: True
 
@@ -103,7 +103,7 @@ train:
     method: Adam
     weight_decay: 0.01
     backbone_weight_decay: 0.01
-    head_weight_decay: 0.0
+    head_weight_decay: 0.01
 
   scheduler:
     factor: 0.1
@@ -120,5 +120,5 @@ test:
 schemes:
   train: True
   online_adaption: False
-  offline_finetune: False
+  offline_finetune: True
   test: False
