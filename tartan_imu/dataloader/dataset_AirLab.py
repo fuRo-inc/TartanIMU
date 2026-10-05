@@ -21,6 +21,14 @@ from tartan_imu.dataloader._common import (
 from tartan_imu.utils.constants import GRAVITY
 
 
+DIRECT_WORLD_VELOCITY_KEYS = (
+    "root_linear_velocity",
+    "base_linear_velocity",
+    "root_velocity_world",
+    "base_velocity_world",
+)
+
+
 class AirLabNPZSequence(object):
     def __init__(
         self,
@@ -92,6 +100,7 @@ class AirLabNPZSequence(object):
         imu = all_data["retargetted_imu"]
         pos = all_data["retargetted_pos"]
         quat = all_data["retargetted_quat"]  # in xyzw format
+        timestamp_valid = np.isfinite(ts)
 
         if verbose:
             logging.info(
@@ -101,30 +110,52 @@ class AirLabNPZSequence(object):
         accel_body = imu[:, :3]
         angular_vel_body = imu[:, 3:]
 
-        # Current-velocity mode uses a per-timestamp derivative.  Prefer a
-        # simulator-provided root/base world velocity when present.
-        direct_velocity_keys = ("root_linear_velocity", "base_linear_velocity",
-                                "root_velocity_world", "base_velocity_world")
-        direct_key = next((key for key in direct_velocity_keys if key in all_data), None)
-        if direct_key is not None:
-            velocity_global_current = np.asarray(all_data[direct_key], dtype=np.float64)
-            if velocity_global_current.shape != pos.shape:
-                raise ValueError(f"{direct_key} must have shape {pos.shape}, got {velocity_global_current.shape}")
-            # Direct simulator velocity remains authoritative. Keep its sanity
-            # check separate from the position-difference fallback policy.
-            self.current_velocity_source = "direct"
-            self.current_velocity_valid = np.isfinite(velocity_global_current).all(axis=1)
-            invalid_direct = int((~self.current_velocity_valid).sum())
-            if invalid_direct:
-                logging.warning("current direct simulator velocity has %d non-finite timestamps", invalid_direct)
-        else:
-            velocity_global_current = current_velocity_from_positions(ts, pos)
-            self.current_velocity_source = "position_difference"
-            speed = np.linalg.norm(velocity_global_current, axis=1)
-            self.current_velocity_valid = np.isfinite(velocity_global_current).all(axis=1) & (
-                speed <= self.current_velocity_max_speed
+        # Prefer the prepared instantaneous body-frame simulator velocity.  It
+        # is already expressed in the root-link body frame, so it must not be
+        # rotated again.  World-frame direct velocity remains a legacy path.
+        if "retargetted_velocity_body" in all_data:
+            velocity_body_current = np.asarray(
+                all_data["retargetted_velocity_body"], dtype=np.float64
             )
-        velocity_body_current = world_to_body_velocity(velocity_global_current, quat)
+            if velocity_body_current.shape != pos.shape:
+                raise ValueError(
+                    "retargetted_velocity_body must have shape "
+                    f"{pos.shape}, got {velocity_body_current.shape}"
+                )
+            self.current_velocity_source = "direct_body"
+            self.current_velocity_valid = (
+                np.isfinite(velocity_body_current).all(axis=1) & timestamp_valid
+            )
+        else:
+            direct_key = next(
+                (key for key in DIRECT_WORLD_VELOCITY_KEYS if key in all_data), None
+            )
+            if direct_key is not None:
+                velocity_global_current = np.asarray(
+                    all_data[direct_key], dtype=np.float64
+                )
+                if velocity_global_current.shape != pos.shape:
+                    raise ValueError(
+                        f"{direct_key} must have shape {pos.shape}, "
+                        f"got {velocity_global_current.shape}"
+                    )
+                # Direct simulator velocity remains authoritative; unlike the
+                # position-difference fallback it is not speed-filtered.
+                self.current_velocity_source = "direct_world"
+                self.current_velocity_valid = (
+                    np.isfinite(velocity_global_current).all(axis=1) & timestamp_valid
+                )
+                velocity_body_current = world_to_body_velocity(velocity_global_current, quat)
+            else:
+                velocity_global_current = current_velocity_from_positions(ts, pos)
+                self.current_velocity_source = "position_difference"
+                speed = np.linalg.norm(velocity_global_current, axis=1)
+                self.current_velocity_valid = (
+                    np.isfinite(velocity_global_current).all(axis=1)
+                    & timestamp_valid
+                    & (speed <= self.current_velocity_max_speed)
+                )
+                velocity_body_current = world_to_body_velocity(velocity_global_current, quat)
         velocity_global, velocity_body = calculate_velocity_from_poses(ts, pos, quat)
 
         # Clip physically-impossible GT velocity spikes (TartanIMU car/dog have
