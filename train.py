@@ -18,6 +18,8 @@ import wandb
 from tartan_imu.model.common import function
 from tartan_imu.model.common.losses import speed_dependent_velocity_weight
 
+from tartan_imu.training.zero_velocity_baseline import metric_rows, summarize, save_metrics
+
 from tools import distributed_eval
 
 # Try to import lora (may not be available in all environments)
@@ -99,6 +101,14 @@ class Trainer:
             if cfg.get("data", {}).get("velocity_target") == "current"
             else {}
         )
+
+        self.zero_baseline_enabled = cfg["train"].get("zero_velocity_baseline", {}).get("enabled", False)
+        if self.zero_baseline_enabled and (
+            cfg.get("data", {}).get("velocity_target") != "current"
+            or not cfg.get("data", {}).get("use_local_coord")
+            or cfg["train"].get("active_heads") != ["dog"]
+        ):
+            raise ValueError("Zero baseline requires current local velocity and active_heads: [dog]")
 
         # Debug output directory
         logging.info(f"Trainer initialization - Output directory: {self.out_dir}")
@@ -222,10 +232,21 @@ class Trainer:
 
         return max(active_lrs)
 
+    def _report_zero_baseline(self, epoch, split, metrics):
+        if self.local_rank != 0:
+            return
+        save_metrics(self.out_dir, epoch, split, metrics)
+        logger.info("Zero velocity baseline epoch=%s split=%s %s", epoch, split, metrics)
+        if self.log:
+            for key, value in metrics.items():
+                write_wandb(f"{split}/zero_velocity_baseline/{key}", value, epoch, self.local_rank)
+
     def inference_step(self, data_loader, epoch):
         """Perform inference on validation/test data."""
         self.model.eval()
         all_results = {"targets": [], "preds": [], "preds_cov": [], "losses": []}
+        if self.zero_baseline_enabled:
+            all_results["zero_baseline_rows"] = []
         full_covariance = bool(self.cfg.get("train", {}).get("covariance", {}).get("enabled", False)
                                and self.cfg.get("model", {}).get("velocity_covariance", {}).get("enabled", False))
         if full_covariance:
@@ -240,6 +261,11 @@ class Trainer:
                 pred, pred_cov, target, orien, loss, _ = function.fun_test_forward(
                     self.cfg, self.model, batch, self.start_cov_epochs, epoch
                 )
+
+                if self.zero_baseline_enabled:
+                    if not torch.all(batch[3] == 2):
+                        raise ValueError("Zero baseline requires dog-only batches")
+                    all_results["zero_baseline_rows"].append(metric_rows(pred, target, self.speed_weighting_cfg))
 
                 # Collect results
                 all_results["targets"].append(target)
@@ -283,6 +309,7 @@ class Trainer:
 
     def train_step(self, data_loader, epoch, fix_backbone=False, current_frame=None):
         """Run one training epoch and return averaged loss/MSE/timing stats."""
+        baseline_totals = torch.zeros(5, dtype=torch.float64, device=self.device) if self.zero_baseline_enabled else None
         total_loss = 0.0
         total_mse = 0.0
         total_steps = 0
@@ -328,6 +355,12 @@ class Trainer:
                 pred, pred_cov, targ, loss = function.fun_train_forward_efficient(
                     self.cfg, self.model, batch, self.start_cov_epochs, epoch
                 )
+            if self.zero_baseline_enabled:
+                if not torch.all(batch[3] == 2):
+                    raise ValueError("Zero baseline requires dog-only batches")
+                rows = metric_rows(pred, targ, self.speed_weighting_cfg)
+                baseline_totals[:4] += rows.sum(0)
+                baseline_totals[4] += len(rows)
             covariance_metrics = function.get_last_covariance_metrics()
             if covariance_metrics:
                 for key, value in covariance_metrics.items():
@@ -361,6 +394,11 @@ class Trainer:
             total_data_time += data_time
             total_compute_time += inferback_time
             data_start = time.time()
+
+        if self.zero_baseline_enabled:
+            if self.use_multi_gpu:
+                torch.distributed.all_reduce(baseline_totals)
+            self._report_zero_baseline(epoch, "train", summarize(baseline_totals[:4].tolist(), baseline_totals[4].item()))
 
         if total_steps == 0:
             return {
@@ -468,6 +506,10 @@ class Trainer:
                 start_t = time.time()
                 val_attr_dict = self.inference_step(val_loader, epoch)
                 end_t = time.time()
+
+                if self.zero_baseline_enabled:
+                    rows = val_attr_dict["zero_baseline_rows"]
+                    self._report_zero_baseline(epoch, "validation", summarize(rows.sum(0), len(rows)))
 
                 validation_loss = np.average(val_attr_dict["losses"])
                 validation_mse = np.mean((val_attr_dict["targets"] - val_attr_dict["preds"]) ** 2)

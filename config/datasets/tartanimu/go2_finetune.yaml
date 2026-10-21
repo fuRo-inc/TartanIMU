@@ -10,7 +10,7 @@ data:
   data_path:
     car: null
     drone: null
-    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500/tartan_imu
+    dog: /home/furo-inc/fuk_ws/unitree_rl_mjlab_test/furo_rl_locomotion_mjlab/locomotion_dataset/dataset/collection_locomotion_oshima_19500_2/tartan_imu
     human: null
 
   use_local_coord: True
@@ -57,9 +57,9 @@ model:
   adapter: True
 
 train:
-  experiment_name: go2_tartanimu_finetune_v17
+  experiment_name: go2_tartanimu_finetune_v18
 
-  out_dir: ./exp_result/go2_tartanimu_finetune_v17
+  out_dir: ./exp_result/go2_tartanimu_finetune_v18
 
   use_pretrain_model: True
   # Pass expert_dog.pt with --checkpoint for a fresh pretrained warm start.
@@ -86,7 +86,7 @@ train:
   # This does not remove fallen data; filter such windows separately if needed.
   velocity_loss:
     speed_weighting:
-      enabled: true
+      enabled: false # true
       alpha: 2.0
       v_ref: 0.25
       power: 2.0
@@ -103,7 +103,7 @@ train:
     method: Adam
     weight_decay: 0.01
     backbone_weight_decay: 0.01
-    head_weight_decay: 0.01
+    head_weight_decay: 0.0
 
   scheduler:
     factor: 0.1
@@ -114,11 +114,11 @@ val:
   n_workers: 2
 
 test:
-  out_dir: ./exp_result/go2_tartanimu_finetune_v17
+  out_dir: ./exp_result/go2_tartanimu_finetune_v18
   n_workers: 2
 
 schemes:
   train: True
   online_adaption: False
-  offline_finetune: True
+  offline_finetune: False
   test: False
